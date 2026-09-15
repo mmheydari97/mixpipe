@@ -1,0 +1,48 @@
+# Optional overrides for the built-in defaults in src/mixpipe/config.py.
+# Anything omitted here falls back to the built-ins, so this file can be as
+# small as you like. Requires PyYAML; ignored with a notice if it's missing.
+#
+# Top-level keys are merged one level deep, so to change a single cleanup
+# setting you must still list the key under `cleanup:`.
+
+cleanup:
+  remove_dc: true
+  denoise: true
+  denoise_strength: 0.6      # 0.0 off .. 1.0 aggressive (artifacts above ~0.8)
+  noise_profile_ms: 400      # leading silence sampled as the noise profile
+  gate_enabled: true
+  gate_threshold_db: -48.0
+  gate_hold_ms: 80.0
+  gate_release_ms: 120.0
+  fade_ms: 5.0
+
+mixdown:
+  headroom_db: -6.0          # pre-master bus peak; leave room for the limiter
+  bus_comp_enabled: true
+
+master:
+  target_lufs: -14.0         # -14 streaming, -16 podcast-ish, -9 loud/aggressive
+  ceiling_db: -1.0           # keep at -1.0; the limiter is sample-peak only
+  master_hpf_hz: 25.0
+  limiter_lookahead_ms: 5.0
+  limiter_release_ms: 60.0
+  master_eq:
+    - {freq: 120.0, gain_db: 0.5, q: 0.7}
+    - {freq: 10000.0, gain_db: 1.0, q: 0.6}
+  glue_comp:
+    threshold_db: -12.0
+    ratio: 1.6
+    attack_ms: 30.0
+    release_ms: 300.0
+    makeup_db: 0.0
+
+advisor:
+  mode: rules                # rules | llm | none
+  provider: anthropic        # anthropic | openrouter
+  model: claude-sonnet-4-6
+  max_gain_db: 12.0
+  max_eq_gain_db: 9.0
+
+# To override a role's treatment, copy the whole role block from
+# src/mixpipe/config.py ROLE_TREATMENTS and edit it. Partial role overrides are
+# not merged - the whole `treatments` key is replaced if you specify it.

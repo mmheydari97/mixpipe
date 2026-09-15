@@ -44,17 +44,24 @@ def normalize_loudness(
     return apply_gain_db(audio, gain), gain
 
 
-def _envelope(
-    detector: np.ndarray, attack_ms: float, release_ms: float, sr: int
+def _smooth_gain(
+    target_gain: np.ndarray, attack_ms: float, release_ms: float, sr: int
 ) -> np.ndarray:
-    """One-pole attack/release smoothing of a detector signal."""
+    """One-pole smoothing of a *gain* envelope (linear, <= 1.0).
+
+    Direction matters and is easy to get backwards: gain moving DOWN is the
+    compressor clamping down, which is the attack; gain moving UP is it letting
+    go, which is the release. Swapping these makes the compressor ignore
+    sustained loud passages, because the gain snaps back to unity on every
+    waveform zero-crossing.
+    """
     a = np.exp(-1.0 / max(1.0, attack_ms / 1000.0 * sr))
     r = np.exp(-1.0 / max(1.0, release_ms / 1000.0 * sr))
-    out = np.empty_like(detector)
-    state = detector[0] if detector.size else 0.0
-    for i in range(detector.size):
-        x = detector[i]
-        coef = a if x > state else r
+    out = np.empty_like(target_gain)
+    state = target_gain[0] if target_gain.size else 1.0
+    for i in range(target_gain.size):
+        x = target_gain[i]
+        coef = a if x < state else r   # reducing gain -> attack
         state = x + coef * (state - x)
         out[i] = state
     return out
@@ -96,9 +103,15 @@ def compress(
     gain_db[above] = (1.0 / ratio - 1.0) * over[above]
 
     # Smooth in the linear domain so attack/release behave like an analog VCA.
-    smoothed = _envelope(
-        from_db(gain_db).astype(np.float64), attack_ms, release_ms, sr
-    )
+    # The detector is a peak follower, so hold the minimum gain over a short
+    # window first: without this, the gain recovers on every zero-crossing and
+    # sustained material barely gets compressed.
+    target_gain = from_db(gain_db).astype(np.float64)
+    hold = max(1, int(0.002 * sr))
+    if hold > 1:
+        padded = np.pad(target_gain, (hold - 1, 0), mode="edge")
+        target_gain = np.lib.stride_tricks.sliding_window_view(padded, hold).min(axis=1)
+    smoothed = _smooth_gain(target_gain, attack_ms, release_ms, sr)
 
     out = audio * (smoothed if audio.ndim == 1 else smoothed[:, None])
     out = apply_gain_db(out.astype(np.float32), makeup_db)
