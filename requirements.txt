@@ -1,0 +1,13 @@
+# core DSP - required
+numpy>=1.24
+scipy>=1.10
+
+# optional, but recommended
+soundfile>=0.12      # better IO than the stdlib wave fallback (FLAC/AIFF/24-bit)
+pyloudnorm>=0.1.1    # real ITU-R BS.1770 LUFS metering
+noisereduce>=3.0     # spectral-gating denoise, better than the built-in
+PyYAML>=6.0          # config file parsing (falls back to built-in defaults)
+
+# optional, for the LLM advisor
+anthropic>=0.40      # Claude. For OpenRouter, plain `requests` is used instead
+requests>=2.31

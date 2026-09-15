@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+out/*
+!out/.gitkeep
+stems/*
+!stems/.gitkeep
+!stems/README.md
+*.wav
+*.aiff
+*.flac
+.DS_Store
+.pytest_cache/
