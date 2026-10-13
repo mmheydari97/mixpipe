@@ -1,0 +1,131 @@
+{
+ "data": [
+  {
+   "id": "thinkingmachines/inkling-small:free",
+   "name": "Thinking Machines: Inkling Small (free)",
+   "description": "Inkling Small is an open-weight multimodal mixture-of-experts model from Thinking Machines Lab, with 12B active paramete",
+   "context_length": 1048576,
+   "architecture": {
+    "modality": "text+image+audio->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "audio"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0",
+    "completion": "0"
+   }
+  },
+  {
+   "id": "openai/gpt-audio-mini",
+   "name": "OpenAI: GPT Audio Mini",
+   "description": "A cost-efficient version of GPT Audio. The new snapshot features an upgraded decoder for more natural sounding voices an",
+   "context_length": 128000,
+   "architecture": {
+    "modality": "text+audio->text+audio",
+    "input_modalities": [
+     "text",
+     "audio"
+    ],
+    "output_modalities": [
+     "text",
+     "audio"
+    ],
+    "tokenizer": "GPT",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.0000006",
+    "completion": "0.0000024",
+    "audio": "0.0000006",
+    "audio_output": "0.0000024"
+   }
+  },
+  {
+   "id": "google/gemini-2.5-flash",
+   "name": "Google: Gemini 2.5 Flash",
+   "description": "Gemini 2.5 Flash is Google's state-of-the-art workhorse model, specifically designed for advanced reasoning, coding, mat",
+   "context_length": 1048576,
+   "architecture": {
+    "modality": "text+image+file+audio+video->text",
+    "input_modalities": [
+     "file",
+     "image",
+     "text",
+     "audio",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Gemini",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.0000003",
+    "completion": "0.0000025",
+    "image": "0.0000003",
+    "audio": "0.000001",
+    "input_audio_cache": "0.0000001",
+    "web_search": "0.014",
+    "internal_reasoning": "0.0000025",
+    "input_cache_read": "0.00000003",
+    "input_cache_write": "0.0000000833333333333333"
+   }
+  },
+  {
+   "id": "openrouter/auto",
+   "name": "Auto Router",
+   "description": "The Auto Router automatically selects the best model for your prompt, powered by the wisdom of the market. It routes you",
+   "context_length": 2000000,
+   "architecture": {
+    "modality": "text+image+file+audio+video->text+image",
+    "input_modalities": [
+     "text",
+     "image",
+     "audio",
+     "file",
+     "video"
+    ],
+    "output_modalities": [
+     "text",
+     "image"
+    ],
+    "tokenizer": "Router",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "-1",
+    "completion": "-1"
+   }
+  },
+  {
+   "id": "inclusionai/ling-3.1-flash",
+   "name": "inclusionAI: Ling 3.1 Flash",
+   "description": "Ling 3.1 Flash is a hybrid reasoning mixture-of-experts model from inclusionAI, with 25B active parameters out of 560B t",
+   "context_length": 262144,
+   "architecture": {
+    "modality": "text->text",
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0",
+    "completion": "0"
+   }
+  }
+ ]
+}

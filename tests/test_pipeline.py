@@ -356,24 +356,32 @@ def test_muted_stem_is_excluded():
 
 def test_stub_modules_do_not_crash_the_pipeline():
     """The # TODO stubs must be safe to call, not landmines."""
-    from mixpipe import pitch, timing, reverb, separation
+    from mixpipe import pitch, timing, reverb
     from mixpipe.eq import deesser, dynamic_eq
     from mixpipe.dynamics import multiband_compress, transient_shaper
     from mixpipe.cleanup import declick, dehum
 
     s = sine()
     assert pitch.correct_pitch(s) is not None
-    assert pitch.detect_key(s) is None
     assert timing.align_stems(fake_stems()) is not None
     assert timing.estimate_offset_samples(s, s) == 0
     assert reverb.algorithmic_reverb(s) is not None
-    assert separation.separate(s, SAMPLE_RATE) == []
     assert deesser(s) is not None
     assert dynamic_eq(s, 1000.0, -20.0) is not None
     assert multiband_compress(s) is not None
     assert transient_shaper(s) is not None
     assert declick(s) is not None
     assert dehum(s) is not None
+
+
+def test_detect_key():
+    """No longer a stub: Krumhansl-Schmuckler over an STFT chroma."""
+    from mixpipe import pitch
+
+    assert pitch.detect_key(np.zeros(SAMPLE_RATE, dtype=np.float32)) is None
+    # A minor triad + A bass, sustained
+    a_minor = sine(220.0, 2.0, 0.3) + sine(261.63, 2.0, 0.2) + sine(329.63, 2.0, 0.2)
+    assert pitch.detect_key(a_minor) in ("A:min", "C:maj")  # relative keys share a profile
 
 
 if __name__ == "__main__":

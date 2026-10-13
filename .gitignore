@@ -11,5 +11,17 @@ stems/*
 *.wav
 *.aiff
 *.flac
+# song uploads the chord finder accepts
+*.wave
+*.aif
+*.ogg
+*.mp3
+*.m4a
+*.aac
+*.mp4
+*.opus
+*.webm
+*.wma
 .DS_Store
 .pytest_cache/
+.ruff_cache/

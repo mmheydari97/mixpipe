@@ -1,0 +1,9 @@
+# Chord finder (mixpipe chords / chords-ui). Heavy: pulls in torch.
+#   pip install -r requirements.txt -r requirements-chords.txt
+librosa>=0.10        # beat tracking, CQT chroma
+demucs>=4.0          # source separation (vocals / bass / other / drums)
+mlx-whisper>=0.4     # local speech-to-text on Apple Silicon
+fastapi>=0.110       # web UI backend
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+pytest>=8.0

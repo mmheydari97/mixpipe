@@ -3,6 +3,8 @@
     python -m mixpipe.cli analyze --stems stems/
     python -m mixpipe.cli plan    --stems stems/ --advisor llm --notes "..."
     python -m mixpipe.cli mix     --stems stems/ --out out/mix_master.wav
+    python -m mixpipe.cli chords  song.mp3 [--lang fa] [--stt openrouter --stt-model ID]
+    python -m mixpipe.cli chords-ui [--port 8765]
 """
 
 from __future__ import annotations
@@ -96,6 +98,66 @@ def cmd_mix(args) -> int:
     return 0
 
 
+CHORDS_DEPS_HINT = "the chord finder needs extra packages: pip install -r requirements-chords.txt"
+
+
+def cmd_chords(args) -> int:
+    try:
+        from .chords import pipeline
+        from .chords.sheet import to_chordpro, to_text
+    except ImportError as exc:
+        raise RuntimeError(f"{CHORDS_DEPS_HINT} ({exc})") from exc
+
+    root = Path(args.out)
+    files = []
+    for f in args.files:
+        p = Path(f)
+        if not p.is_file():
+            raise FileNotFoundError(f"no such file: {p}")
+        files.append((p.name, p.read_bytes()))
+    song_id = pipeline.new_song(files, root, title=args.title)
+    song_dir = root / song_id
+
+    def progress(stage: str, frac: float, msg: str) -> None:
+        if not args.quiet and frac in (0.0, 0.1, 1.0):
+            print(f"[{stage:<10}] {msg}")
+
+    sheet = pipeline.analyze(
+        song_dir,
+        {"language": args.lang, "stt": args.stt, "stt_model": args.stt_model,
+         "separate": not args.no_separate},
+        progress=progress,
+    )
+    pipeline.set_status(song_dir, "done", "align", 1.0, "done")
+    (song_dir / f"{song_id}.cho").write_text(to_chordpro(sheet))
+    (song_dir / f"{song_id}.txt").write_text(to_text(sheet))
+    if not args.quiet:
+        print()
+        print(to_text(sheet))
+        print(f"wrote {song_dir}/sheet.json, {song_id}.cho, {song_id}.txt")
+        print("open it in the editor with: python -m mixpipe.cli chords-ui")
+    return 0
+
+
+def cmd_chords_ui(args) -> int:
+    try:
+        import uvicorn
+
+        from .web.server import create_app
+    except ImportError as exc:
+        raise RuntimeError(f"{CHORDS_DEPS_HINT} ({exc})") from exc
+
+    url = f"http://{args.host}:{args.port}/"
+    print(f"mixpipe chords UI on {url}  (Ctrl+C to stop)")
+    if not args.no_browser:
+        import threading
+        import webbrowser
+
+        threading.Timer(1.0, webbrowser.open, [url]).start()
+    uvicorn.run(create_app(args.out), host=args.host, port=args.port, log_level="warning")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="mixpipe",
@@ -130,6 +192,28 @@ def main(argv: list[str] | None = None) -> int:
     p_mx.add_argument("--dump-stems", action="store_true",
                       help="also write processed stems for DAW import")
     p_mx.set_defaults(func=cmd_mix)
+
+    p_ch = sub.add_parser("chords", help="find chords + lyrics in a song (headless)")
+    p_ch.add_argument("files", nargs="+",
+                      help="one full song, or several stems (vox.wav, bass.wav, ...)")
+    p_ch.add_argument("--lang", default="auto",
+                      help="lyrics language: auto, an ISO code like en/fa, or none")
+    p_ch.add_argument("--stt", choices=["mlx", "openrouter"], default="mlx",
+                      help="speech-to-text backend (default: local mlx-whisper)")
+    p_ch.add_argument("--stt-model", default=None, help="OpenRouter transcription model id")
+    p_ch.add_argument("--no-separate", action="store_true",
+                      help="skip Demucs separation of a single full-mix file")
+    p_ch.add_argument("--title", default=None)
+    p_ch.add_argument("--out", default="out/chords", help="song store directory")
+    p_ch.add_argument("--quiet", action="store_true")
+    p_ch.set_defaults(func=cmd_chords)
+
+    p_ui = sub.add_parser("chords-ui", help="start the chord finder web UI")
+    p_ui.add_argument("--host", default="127.0.0.1")
+    p_ui.add_argument("--port", type=int, default=8765)
+    p_ui.add_argument("--out", default="out/chords", help="song store directory")
+    p_ui.add_argument("--no-browser", action="store_true")
+    p_ui.set_defaults(func=cmd_chords_ui)
 
     args = parser.parse_args(argv)
     try:

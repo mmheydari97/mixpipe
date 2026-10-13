@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MixPipe Chords</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23b4441f'/%3E%3Ctext x='16' y='22' font-family='Menlo,monospace' font-size='15' font-weight='700' fill='white' text-anchor='middle'%3EAm%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">mixpipe <span>chords</span></a>
+  </header>
+
+  <main>
+    <!-- ================= library ================= -->
+    <section id="library-view" hidden>
+      <div class="card upload">
+        <h2>New song</h2>
+        <label id="dropzone" class="dropzone" tabindex="0">
+          <input id="file-input" type="file" accept="audio/*,.m4a,.flac,.aiff,.aif,.opus" multiple hidden>
+          <strong>Drop audio here</strong> or click to choose
+          <small>One file = a full song (vocals are separated automatically).
+            Several files = stems: name them like <code>vox.wav</code>, <code>bass.wav</code>,
+            <code>guitar.wav</code> so vocals feed the lyrics and the rest feeds the chords.</small>
+        </label>
+        <ul id="file-list" class="file-list"></ul>
+
+        <div class="options">
+          <label class="field">
+            <span>Lyrics language</span>
+            <select id="language">
+              <option value="auto">Auto-detect</option>
+              <option value="en">English</option>
+              <option value="fa">Persian (فارسی)</option>
+              <option value="ar">Arabic</option>
+              <option value="tr">Turkish</option>
+              <option value="es">Spanish</option>
+              <option value="pt">Portuguese</option>
+              <option value="fr">French</option>
+              <option value="de">German</option>
+              <option value="it">Italian</option>
+              <option value="ru">Russian</option>
+              <option value="hi">Hindi</option>
+              <option value="ja">Japanese</option>
+              <option value="ko">Korean</option>
+              <option value="zh">Chinese</option>
+              <option value="none">No lyrics (instrumental)</option>
+            </select>
+          </label>
+
+          <div class="field">
+            <span>Transcription</span>
+            <div class="segmented" role="radiogroup" aria-label="Transcription backend">
+              <label><input type="radio" name="stt" value="mlx" checked> Local Whisper <em>free · private</em></label>
+              <label><input type="radio" name="stt" value="openrouter"> OpenRouter</label>
+            </div>
+          </div>
+
+          <div class="field" id="stt-model-field" hidden>
+            <span>OpenRouter transcription model</span>
+            <div id="stt-picker"></div>
+            <small id="stt-key-warning" class="warn" hidden>OPENROUTER_API_KEY isn't set on the server. Set it and restart <code>chords-ui</code>.</small>
+          </div>
+
+          <label class="check" id="separate-field">
+            <input id="separate" type="checkbox" checked>
+            Separate vocals and drums first (Demucs) — recommended for full songs
+          </label>
+        </div>
+
+        <div class="actions">
+          <button id="analyze-btn" class="primary" disabled>Analyze</button>
+        </div>
+        <div id="upload-progress"></div>
+      </div>
+
+      <div class="card">
+        <h2>Songs</h2>
+        <ul id="song-list" class="song-list"><li class="muted">Nothing analysed yet.</li></ul>
+      </div>
+    </section>
+
+    <!-- ================= song ================= -->
+    <section id="song-view" hidden>
+      <div class="song-head">
+        <a href="#/" class="back">← Songs</a>
+        <h1 id="song-title"></h1>
+        <div id="song-meta" class="meta"></div>
+        <div class="toolbar">
+          <button id="edit-btn">Edit lyrics</button>
+          <button id="polish-btn">Polish lyrics…</button>
+          <label class="check small"><input id="follow" type="checkbox" checked> Follow playback</label>
+          <span class="spacer"></span>
+          <a id="export-cho" class="button" download>ChordPro</a>
+          <a id="export-txt" class="button" download>Text</a>
+        </div>
+      </div>
+
+      <div class="arrange" id="arrange">
+        <div class="group" role="group" aria-label="Transpose">
+          <span class="lbl">Transpose</span>
+          <button id="tr-down" aria-label="Transpose down a semitone">−</button>
+          <output id="tr-val">0</output>
+          <button id="tr-up" aria-label="Transpose up a semitone">+</button>
+        </div>
+        <div class="group">
+          <label class="lbl" for="capo">Capo</label>
+          <select id="capo"></select>
+          <button id="capo-suggest" class="link" hidden></button>
+        </div>
+        <div class="group">
+          <label class="lbl" for="meter">Time</label>
+          <select id="meter">
+            <option>2/4</option>
+            <option>3/4</option>
+            <option>4/4</option>
+            <option>6/8</option>
+          </select>
+        </div>
+        <div class="group" title="If the bar lines sit a beat too early or too late compared with where you feel '1', nudge them here.">
+          <span class="lbl">Bar lines</span>
+          <button id="db-left" aria-label="Move bar lines one beat earlier">◀ 1 beat</button>
+          <button id="db-right" aria-label="Move bar lines one beat later">1 beat ▶</button>
+          <button id="meter-reset" class="link" hidden>reset</button>
+        </div>
+        <label class="check small"><input id="show-bars" type="checkbox" checked> Show bar lines</label>
+      </div>
+
+      <div id="song-progress"></div>
+
+      <div id="editor" class="card" hidden>
+        <p class="muted">One lyric line per row, blank line between verses. Words you keep keep
+          their timing, and chords stay at their times, so they'll re-land on the right words.</p>
+        <textarea id="editor-text" spellcheck="false" rows="16"></textarea>
+        <div class="actions">
+          <button id="editor-cancel">Cancel</button>
+          <button id="editor-save" class="primary">Save lyrics</button>
+        </div>
+      </div>
+
+      <div id="sheet" class="sheet"></div>
+    </section>
+  </main>
+
+  <footer class="player" id="player" hidden>
+    <audio id="audio" controls preload="auto"></audio>
+    <div class="now">
+      <span class="now-label">Now</span><b id="now-chord">–</b>
+      <span class="now-label">Next</span><span id="next-chord">–</span>
+    </div>
+  </footer>
+
+  <!-- chord candidate menu (one, repositioned per chip) -->
+  <div id="chord-menu" class="chord-menu" hidden role="menu"></div>
+
+  <dialog id="polish-dialog">
+    <form method="dialog" class="dialog-body" id="polish-form">
+      <h2>Polish lyrics with an LLM</h2>
+      <p class="muted">Sends only the lyric <em>text</em> to the model to fix misheard words.
+        You review the changes before anything is saved. Type <b>free</b> to put free models first.</p>
+      <div id="chat-picker"></div>
+      <small id="chat-key-warning" class="warn" hidden>OPENROUTER_API_KEY isn't set on the server.</small>
+      <div id="polish-result"></div>
+      <div class="actions">
+        <button value="cancel" formnovalidate>Close</button>
+        <button id="polish-run" type="button">Suggest fixes</button>
+        <button id="polish-accept" type="button" class="primary" hidden>Accept changes</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

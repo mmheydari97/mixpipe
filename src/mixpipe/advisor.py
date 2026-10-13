@@ -203,30 +203,16 @@ def _call_anthropic(payload: str, model: str, max_tokens: int = 4000) -> str:
 
 
 def _call_openrouter(payload: str, model: str, max_tokens: int = 4000) -> str:
-    import requests
+    from . import openrouter
 
-    key = os.environ.get("OPENROUTER_API_KEY")
-    if not key:
-        raise RuntimeError("OPENROUTER_API_KEY is not set")
-
-    resp = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "max_tokens": max_tokens,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": payload},
-            ],
-        },
-        timeout=120,
+    return openrouter.chat(
+        [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": payload},
+        ],
+        model=model,
+        max_tokens=max_tokens,
     )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
 
 
 def llm_advisor(
