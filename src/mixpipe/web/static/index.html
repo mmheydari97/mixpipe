@@ -26,6 +26,14 @@
         </label>
         <ul id="file-list" class="file-list"></ul>
 
+        <div class="or"><span>or paste a link</span></div>
+        <label class="field link-field">
+          <span class="sr-only">Link to a song</span>
+          <input id="link-input" type="url" inputmode="url" autocomplete="off" spellcheck="false"
+            placeholder="YouTube, SoundCloud, Spotify, Bandcamp… or a direct link to an audio file">
+          <small class="muted">Spotify tracks can't be downloaded, so the same song is found on YouTube instead.</small>
+        </label>
+
         <div class="options">
           <label class="field">
             <span>Lyrics language</span>
@@ -87,6 +95,7 @@
         <a href="#/" class="back">← Songs</a>
         <h1 id="song-title"></h1>
         <div id="song-meta" class="meta"></div>
+        <p id="song-source" class="source" hidden></p>
         <div class="toolbar">
           <button id="edit-btn">Edit lyrics</button>
           <button id="polish-btn">Polish lyrics…</button>

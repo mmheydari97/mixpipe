@@ -4,6 +4,7 @@
     python -m mixpipe.cli plan    --stems stems/ --advisor llm --notes "..."
     python -m mixpipe.cli mix     --stems stems/ --out out/mix_master.wav
     python -m mixpipe.cli chords  song.mp3 [--lang fa] [--stt openrouter --stt-model ID]
+    python -m mixpipe.cli chords  https://youtu.be/...   (YouTube, SoundCloud, Spotify, ...)
     python -m mixpipe.cli chords-ui [--port 8765]
 """
 
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -109,13 +111,27 @@ def cmd_chords(args) -> int:
         raise RuntimeError(f"{CHORDS_DEPS_HINT} ({exc})") from exc
 
     root = Path(args.out)
-    files = []
-    for f in args.files:
-        p = Path(f)
-        if not p.is_file():
-            raise FileNotFoundError(f"no such file: {p}")
-        files.append((p.name, p.read_bytes()))
-    song_id = pipeline.new_song(files, root, title=args.title)
+    links = [f for f in args.files if re.match(r"^https?://", f)]
+    if links:
+        from .chords.fetch import FetchError, resolve
+
+        if len(args.files) > 1:
+            raise ValueError("give either one link or audio files, not both")
+        try:
+            source = resolve(links[0])
+        except FetchError as exc:
+            raise ValueError(f"{links[0]}: {exc}") from exc
+        if source.get("note") and not args.quiet:
+            print(source["note"])
+        song_id = pipeline.new_song_from_url(source, root, title=args.title)
+    else:
+        files = []
+        for f in args.files:
+            p = Path(f)
+            if not p.is_file():
+                raise FileNotFoundError(f"no such file: {p}")
+            files.append((p.name, p.read_bytes()))
+        song_id = pipeline.new_song(files, root, title=args.title)
     song_dir = root / song_id
 
     def progress(stage: str, frac: float, msg: str) -> None:
@@ -195,7 +211,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p_ch = sub.add_parser("chords", help="find chords + lyrics in a song (headless)")
     p_ch.add_argument("files", nargs="+",
-                      help="one full song, or several stems (vox.wav, bass.wav, ...)")
+                      help="one full song, several stems (vox.wav, bass.wav, ...), or a "
+                           "link (YouTube, SoundCloud, Spotify, a direct audio URL, ...)")
     p_ch.add_argument("--lang", default="auto",
                       help="lyrics language: auto, an ISO code like en/fa, or none")
     p_ch.add_argument("--stt", choices=["mlx", "openrouter"], default="mlx",

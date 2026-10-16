@@ -6,4 +6,5 @@ mlx-whisper>=0.4     # local speech-to-text on Apple Silicon
 fastapi>=0.110       # web UI backend
 uvicorn[standard]>=0.29
 python-multipart>=0.0.9
+yt-dlp[default]>=2026.8   # songs from links (YouTube, SoundCloud, ...)
 pytest>=8.0

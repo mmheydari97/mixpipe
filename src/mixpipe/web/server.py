@@ -8,6 +8,7 @@ share well); the page polls /status while a job runs.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import threading
@@ -19,7 +20,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from ..chords import pipeline
+from ..chords import fetch, pipeline
 from ..chords.align import lines_to_text, reanchor, word_diff
 from ..chords.sheet import (apply_settings, custom_from_display, load_sheet, save_sheet,
                             to_chordpro, to_text, view)
@@ -41,6 +42,15 @@ Fix misheard words, spelling and obvious punctuation. Keep the original language
 and wording wherever it is plausible. Keep exactly the same number of lines in \
 the same order. Do not add, remove, merge or translate lines. Do not add titles, \
 section labels, notes or commentary. Return only the corrected lyrics."""
+
+
+class LinkIn(BaseModel):
+    url: str
+    language: str = "auto"
+    stt: str = "mlx"
+    stt_model: str | None = None
+    separate: bool = True
+    rerun: bool = False
 
 
 class LyricsIn(BaseModel):
@@ -70,9 +80,12 @@ def create_app(
     separator=None,
     transcriber=None,
     run_inline: bool = False,
+    resolver=None,
+    downloader=None,
 ) -> FastAPI:
-    """Build the app. `separator`/`transcriber` are injectable for tests, and
-    `run_inline` runs analysis synchronously instead of in the worker thread."""
+    """Build the app. `separator`/`transcriber`/`resolver`/`downloader` are
+    injectable for tests, and `run_inline` runs analysis synchronously instead
+    of in the worker thread."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     app = FastAPI(title="mixpipe chords")
@@ -94,7 +107,8 @@ def create_app(
         return p
 
     def submit(d: Path, options: dict) -> None:
-        kwargs = {"separator": separator, "transcriber": transcriber, "root": root}
+        kwargs = {"separator": separator, "transcriber": transcriber, "root": root,
+                  "downloader": downloader}
         if run_inline:
             pipeline.run_job(d, options, **kwargs)
         else:
@@ -106,6 +120,24 @@ def create_app(
     def songs():
         return pipeline.list_songs(root)
 
+    def check_stt(stt: str, stt_model: str | None) -> None:
+        if stt not in ("mlx", "openrouter"):
+            raise HTTPException(400, "stt must be mlx or openrouter")
+        if stt == "openrouter" and not stt_model:
+            raise HTTPException(400, "pick an OpenRouter transcription model")
+
+    def start(song_id: str, options: dict, rerun: bool) -> dict:
+        d = root / song_id
+        if (d / "sheet.json").exists() and not rerun:
+            # same song added again: keep the existing (possibly edited) sheet
+            pipeline.set_status(d, "done", "align", 1.0, "already analysed")
+        else:
+            needs_download = not json.loads((d / "meta.json").read_text())["inputs"]
+            pipeline.set_status(d, "queued", "download" if needs_download else "decode",
+                                0.0, "waiting")
+            submit(d, options)
+        return {"id": song_id}
+
     @app.post("/api/songs")
     async def upload(
         files: list[UploadFile] = File(...),
@@ -115,25 +147,27 @@ def create_app(
         separate: bool = Form(True),
         rerun: bool = Form(False),
     ):
-        if stt not in ("mlx", "openrouter"):
-            raise HTTPException(400, "stt must be mlx or openrouter")
-        if stt == "openrouter" and not stt_model:
-            raise HTTPException(400, "pick an OpenRouter transcription model")
+        check_stt(stt, stt_model)
         data = [(f.filename or "audio", await f.read()) for f in files]
         try:
             song_id = pipeline.new_song(data, root)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        d = root / song_id
-        options = {"language": language, "stt": stt, "stt_model": stt_model,
-                   "separate": separate}
-        if (d / "sheet.json").exists() and not rerun:
-            # same files uploaded again: keep the existing (possibly edited) sheet
-            pipeline.set_status(d, "done", "align", 1.0, "already analysed")
-        else:
-            pipeline.set_status(d, "queued", "decode", 0.0, "waiting")
-            submit(d, options)
-        return {"id": song_id}
+        return start(song_id, {"language": language, "stt": stt, "stt_model": stt_model,
+                               "separate": separate}, rerun)
+
+    @app.post("/api/songs/link")
+    def from_link(body: LinkIn):
+        # plain def: FastAPI runs it in a thread, so the lookup doesn't block the loop
+        check_stt(body.stt, body.stt_model)
+        try:
+            source = (resolver or fetch.resolve)(body.url)
+        except fetch.FetchError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        song_id = pipeline.new_song_from_url(source, root)
+        return start(song_id, {"language": body.language, "stt": body.stt,
+                               "stt_model": body.stt_model, "separate": body.separate},
+                     body.rerun)
 
     @app.get("/api/songs/{song_id}/status")
     def status(song_id: str):

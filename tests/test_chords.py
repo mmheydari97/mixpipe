@@ -689,3 +689,148 @@ def test_time_signature_setting_maps_to_tracked_beats(grid_sheet):
     assert grid_sheet["meter"]["beats_per_bar"] == 6     # fast pulse = eighths
     apply_settings(grid_sheet, time_signature="2/4")
     assert grid_sheet["meter"]["beats_per_bar"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# songs from a link (no network: resolve/download are faked)
+# --------------------------------------------------------------------------- #
+
+SPOTIFY_PAGE = """<html><head><title>Song | Spotify</title>
+<meta property="og:title" content="Don&#x27;t Stop Me Now"/>
+<meta property="og:description" content="Queen · Jazz · Song · 1978"/>
+<meta name="music:duration" content="209"/>
+<meta name="music:musician_description" content="Queen"/>
+</head></html>"""
+
+
+def test_parse_spotify_page():
+    from mixpipe.chords.fetch import parse_spotify_page
+
+    assert parse_spotify_page(SPOTIFY_PAGE) == {
+        "title": "Don't Stop Me Now", "artist": "Queen", "duration": 209.0}
+    no_artist_tag = SPOTIFY_PAGE.replace('name="music:musician_description"', 'name="x"')
+    assert parse_spotify_page(no_artist_tag)["artist"] == "Queen"  # from og:description
+
+
+def test_spotify_match_prefers_same_recording():
+    from mixpipe.chords.fetch import pick_match
+
+    track = {"title": "Don't Stop Me Now", "artist": "Queen", "duration": 209.0}
+    results = [
+        {"id": "a", "title": "Queen - Don't Stop Me Now (Live at Wembley)", "duration": 210},
+        {"id": "b", "title": "Queen - Don't Stop Me Now (Official Video)", "duration": 216},
+        {"id": "c", "title": "Don't Stop Me Now - 1 hour loop", "duration": 3600},
+    ]
+    assert pick_match(results, track)["id"] == "b"
+    assert pick_match([], track) is None
+
+
+def test_link_checks():
+    from mixpipe.chords.fetch import FetchError, _clean_error, check_url, is_spotify
+
+    for bad in ("", "youtube.com/watch?v=x", "ftp://host/a.mp3", "file:///etc/passwd"):
+        with pytest.raises(FetchError):
+            check_url(bad)
+    assert check_url("  https://youtu.be/x ") == "https://youtu.be/x"
+    assert is_spotify("https://open.spotify.com/track/abc")
+    assert is_spotify("https://spotify.link/xyz")
+    assert not is_spotify("https://notspotify.com/track/abc")
+    assert _clean_error(Exception("ERROR: Unsupported URL: https://x")) == \
+        "couldn't find any audio at that link"
+    assert _clean_error(Exception("ERROR: [youtube] abc: Video unavailable")) == "Video unavailable"
+
+
+def _fake_link(wav: bytes):
+    calls = {"resolve": 0, "download": 0, "fail": False}
+
+    def resolver(url):
+        from mixpipe.chords.fetch import FetchError
+
+        calls["resolve"] += 1
+        if "playlist" in url:
+            raise FetchError("that's a playlist or album; paste a link to a single song")
+        return {"url": url, "page_url": "https://www.youtube.com/watch?v=abc",
+                "download_url": "https://www.youtube.com/watch?v=abc", "site": "Youtube",
+                "title": "Some Band - Some Song", "duration": 16.0, "note": None}
+
+    def downloader(source, dest, progress=None):
+        from mixpipe.chords.fetch import FetchError
+
+        calls["download"] += 1
+        if calls["fail"]:
+            raise FetchError("download failed: Video unavailable")
+        progress(0.5, "downloading")
+        path = Path(dest) / "audio.wav"
+        path.write_bytes(wav)
+        return path
+
+    return calls, resolver, downloader
+
+
+def test_api_link_flow(tmp_path, progression_audio):
+    from fastapi.testclient import TestClient
+
+    import soundfile as sf
+
+    from mixpipe.web.server import create_app
+
+    buf = io.BytesIO()
+    sf.write(buf, progression_audio, SR, format="WAV")
+    calls, resolver, downloader = _fake_link(buf.getvalue())
+    client = TestClient(create_app(tmp_path, separator=fake_separator,
+                                   transcriber=fake_transcriber, run_inline=True,
+                                   resolver=resolver, downloader=downloader))
+
+    r = client.post("/api/songs/link", json={"url": "https://www.youtube.com/playlist?list=x"})
+    assert r.status_code == 400 and "single song" in r.json()["detail"]
+    assert client.get("/api/songs").json() == []
+
+    r = client.post("/api/songs/link", json={"url": "https://youtu.be/abc", "language": "en"})
+    assert r.status_code == 200, r.text
+    sid = r.json()["id"]
+    assert sid.startswith("some-band-some-song-")
+    st = client.get(f"/api/songs/{sid}/status").json()
+    assert st["state"] == "done" and st["from_url"] is True, st
+    song = client.get(f"/api/songs/{sid}").json()
+    assert song["title"] == "Some Band - Some Song"
+    assert song["source"]["site"] == "Youtube"
+    assert [c["candidates"][0]["label"] for c in song["chords"]][:3] == ["C", "G", "Am"]
+    assert client.get(f"/api/songs/{sid}/audio").status_code == 200
+    meta = json.loads((tmp_path / sid / "meta.json").read_text())
+    assert meta["inputs"] == ["audio.wav"]
+
+    # the same link again: same song, edits kept, nothing downloaded twice
+    cid = song["chords"][1]["id"]
+    client.patch(f"/api/songs/{sid}/chords/{cid}", json={"custom": "G6"})
+    r = client.post("/api/songs/link", json={"url": "https://www.youtube.com/watch?v=abc"})
+    assert r.json()["id"] == sid and calls["download"] == 1
+    again = client.get(f"/api/songs/{sid}").json()
+    assert next(c for c in again["chords"] if c["id"] == cid)["custom"] == "G6"
+
+    # uploads are not marked as links
+    r = client.post("/api/songs", files=[("files", ("up.wav", buf.getvalue(), "audio/wav"))])
+    assert client.get(f"/api/songs/{r.json()['id']}/status").json()["from_url"] is False
+
+
+def test_api_link_download_failure_then_retry(tmp_path, progression_audio):
+    from fastapi.testclient import TestClient
+
+    import soundfile as sf
+
+    from mixpipe.web.server import create_app
+
+    buf = io.BytesIO()
+    sf.write(buf, progression_audio, SR, format="WAV")
+    calls, resolver, downloader = _fake_link(buf.getvalue())
+    client = TestClient(create_app(tmp_path, separator=fake_separator,
+                                   transcriber=fake_transcriber, run_inline=True,
+                                   resolver=resolver, downloader=downloader))
+    calls["fail"] = True
+    sid = client.post("/api/songs/link", json={"url": "https://youtu.be/abc"}).json()["id"]
+    st = client.get(f"/api/songs/{sid}/status").json()
+    assert st["state"] == "error" and st["stage"] == "download"
+    assert st["error"] == "download failed: Video unavailable"
+
+    calls["fail"] = False
+    client.post("/api/songs/link", json={"url": "https://youtu.be/abc", "rerun": True})
+    assert client.get(f"/api/songs/{sid}/status").json()["state"] == "done"

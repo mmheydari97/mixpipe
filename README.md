@@ -81,7 +81,8 @@ Stem role detection is filename-based: name files like `acoustic_gtr.wav`,
 
 ## Chord finder
 
-Upload a song (a full mix, or several stems) and get an editable chord sheet:
+Upload a song (a full mix, or several stems) or paste a link (YouTube,
+SoundCloud, Spotify, a direct audio URL, …) and get an editable chord sheet:
 lyrics transcribed locally, chords placed on the word where they change, and a
 dropdown on every chord with the 2nd and 3rd candidates plus a "hear it" button.
 
@@ -92,6 +93,7 @@ pip install -r requirements.txt -r requirements-chords.txt
 
 PYTHONPATH=src python -m mixpipe.cli chords-ui                  # web UI on http://127.0.0.1:8765
 PYTHONPATH=src python -m mixpipe.cli chords song.m4a --lang fa  # headless: sheet.json + .cho + .txt
+PYTHONPATH=src python -m mixpipe.cli chords "https://youtu.be/..."  # or a link
 ```
 
 Full guide (install, using the page, CLI flags, troubleshooting):

@@ -1,10 +1,10 @@
-"""Song store and the analysis pipeline: decode -> separate -> transcribe ->
-chords -> align.
+"""Song store and the analysis pipeline: (download ->) decode -> separate ->
+transcribe -> chords -> align.
 
 Each song lives in out/chords/<song_id>/:
 
-  meta.json        id, title, created, input file names
-  inputs/          the uploaded files, untouched
+  meta.json        id, title, created, input file names, source (songs from a link)
+  inputs/          the uploaded or downloaded files, untouched
   mix.flac         playback audio, only when the inputs can't be served as-is
   separated/       Demucs stems (mono FLAC), cached
   transcript.json  cached, keyed by backend/model/language
@@ -27,12 +27,13 @@ from typing import Callable
 
 import numpy as np
 
+from .fetch import FetchError, song_key
 from .ingest import UPLOAD_EXTS, WORK_SR, Ingested, ingest
 from .sheet import SHEET_VERSION, load_sheet, save_sheet
 
 DEFAULT_ROOT = Path("out/chords")
 RECOGNIZER_VERSION = 4
-STAGES = ("decode", "separate", "transcribe", "chords", "align")
+STAGES = ("download", "decode", "separate", "transcribe", "chords", "align")
 BROWSER_PLAYABLE = {".mp3", ".m4a", ".aac", ".mp4", ".wav", ".flac", ".ogg", ".opus", ".webm"}
 
 DEFAULT_OPTIONS = {
@@ -88,6 +89,25 @@ def new_song(files: list[tuple[str, bytes]], root: Path = DEFAULT_ROOT,
     return song_id
 
 
+def new_song_from_url(source: dict, root: Path = DEFAULT_ROOT,
+                      title: str | None = None) -> str:
+    """Register a song from a resolved link (see fetch.resolve). The audio is
+    downloaded by analyze(), in the background. Returns its id."""
+    title = title or source.get("title") or "song"
+    slug = re.sub(r"-{2,}", "-", _slug(title))  # "Artist - Song" -> artist-song
+    song_id = f"{slug}-{song_key(source)[:6]}"
+    song_dir = Path(root) / song_id
+    (song_dir / "inputs").mkdir(parents=True, exist_ok=True)
+    meta_path = song_dir / "meta.json"
+    if not meta_path.exists():
+        _write_json(meta_path, {
+            "id": song_id, "title": title, "created": time.time(), "inputs": [],
+            "source": source,
+        })
+        set_status(song_dir, "queued", "download", 0.0, "waiting")
+    return song_id
+
+
 def list_songs(root: Path = DEFAULT_ROOT) -> list[dict]:
     root = Path(root)
     if not root.is_dir():
@@ -112,7 +132,10 @@ def get_status(song_dir: Path) -> dict:
     path = Path(song_dir) / "status.json"
     if not path.exists():
         return {"state": "unknown"}
-    return json.loads(path.read_text())
+    status = json.loads(path.read_text())
+    meta_path = Path(song_dir) / "meta.json"
+    status["from_url"] = meta_path.exists() and "source" in json.loads(meta_path.read_text())
+    return status
 
 
 def _write_json(path: Path, data) -> None:
@@ -180,12 +203,14 @@ def analyze(
     separator: Callable | None = None,
     transcriber: Callable | None = None,
     root: Path | None = None,
+    downloader: Callable | None = None,
 ) -> dict:
     """Run every stage for one song and write sheet.json. Returns the sheet.
 
-    `separator(audio, sr, progress=cb) -> list[Stem]` and
-    `transcriber(vocal, sr, backend=, model=, language=) -> transcript` can be
-    injected (tests use fakes so no models are downloaded).
+    `separator(audio, sr, progress=cb) -> list[Stem]`,
+    `transcriber(vocal, sr, backend=, model=, language=) -> transcript` and
+    `downloader(source, dest_dir, progress=cb) -> Path` can be injected (tests
+    use fakes so no models or songs are downloaded).
     """
     from .recognize import recognize
     from .transcribe import has_vocals, transcribe, vocal_activity
@@ -195,6 +220,18 @@ def analyze(
     opts = {**DEFAULT_OPTIONS, **(options or {})}
     meta = json.loads((song_dir / "meta.json").read_text())
     report = progress or (lambda stage, frac, msg: None)
+
+    # ---- download (songs from a link) -----------------------------------------
+    source = meta.get("source")
+    if source and not meta["inputs"]:
+        report("download", 0.0, f"fetching from {source['site']}")
+        if downloader is None:
+            from .fetch import download as downloader
+        path = downloader(source, song_dir / "inputs",
+                          progress=lambda f, msg: report("download", f, msg))
+        meta["inputs"] = [path.name]
+        _write_json(song_dir / "meta.json", meta)
+        report("download", 1.0, f"downloaded {path.stat().st_size / 1e6:.1f} MB")
 
     # ---- decode ---------------------------------------------------------------
     report("decode", 0.0, "decoding audio")
@@ -298,6 +335,8 @@ def analyze(
         "lines": [{"words": ln, "gap_before": False} for ln in transcript["lines"]],
         "chords": chords["segments"],
     }
+    if source:
+        sheet["source"] = {k: source.get(k) for k in ("url", "page_url", "site", "note")}
     save_sheet(sheet, song_dir / "sheet.json")
     report("align", 1.0, "done")
     return sheet
@@ -325,13 +364,14 @@ def run_job(song_dir: Path, options: dict | None = None, **kwargs) -> dict | Non
         sheet = analyze(song_dir, options, progress=progress, **kwargs)
     except Exception as exc:  # noqa: BLE001 - surface any failure to the UI
         st = get_status(song_dir)
+        error = str(exc) if isinstance(exc, FetchError) else f"{type(exc).__name__}: {exc}"
         set_status(song_dir, "error", st.get("stage", "decode"), st.get("progress", 0.0),
-                   "failed", error=f"{type(exc).__name__}: {exc}")
+                   "failed", error=error)
         return None
     set_status(song_dir, "done", "align", 1.0, "done")
     return sheet
 
 
-__all__ = ["DEFAULT_ROOT", "STAGES", "analyze", "run_job", "new_song", "list_songs",
-           "get_status", "set_status", "playback_file", "openrouter_caps",
+__all__ = ["DEFAULT_ROOT", "STAGES", "analyze", "run_job", "new_song", "new_song_from_url",
+           "list_songs", "get_status", "set_status", "playback_file", "openrouter_caps",
            "load_sheet", "save_sheet", "WORK_SR"]

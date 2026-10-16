@@ -267,10 +267,12 @@ function createModelPicker(container, kind, { placeholder, initialQuery = "", on
 // progress panel
 // =========================================================================
 
-const STAGES = ["decode", "separate", "transcribe", "chords", "align"];
-const STAGE_LABEL = { decode: "Decode", separate: "Separate", transcribe: "Lyrics", chords: "Chords", align: "Align" };
+const STAGES_FILE = ["decode", "separate", "transcribe", "chords", "align"];
+const STAGES_LINK = ["download", ...STAGES_FILE];
+const STAGE_LABEL = { download: "Download", decode: "Decode", separate: "Separate", transcribe: "Lyrics", chords: "Chords", align: "Align" };
 
 function renderProgress(container, st, { onRetry } = {}) {
+  const STAGES = st.from_url ? STAGES_LINK : STAGES_FILE;
   const idx = STAGES.indexOf(st.stage);
   const overall = st.state === "done" ? 1 : Math.max(0, (idx + (st.progress || 0)) / STAGES.length);
   const pills = STAGES.map((s, i) => el("span", {
@@ -309,12 +311,15 @@ async function pollStatus(id, container, { onDone, onRetry } = {}) {
 
 const lib = { files: [], sttPicker: null, hasKey: null };
 
+const linkValue = () => $("#link-input").value.trim();
+const hasInput = () => lib.files.length > 0 || linkValue() !== "";
+
 function renderFileList() {
   const ul = $("#file-list");
   ul.replaceChildren(...lib.files.map((f, i) => el("li", {}, f.name,
     el("button", { title: "Remove", "aria-label": `Remove ${f.name}`,
       onclick: (e) => { e.preventDefault(); lib.files.splice(i, 1); renderFileList(); } }, "×"))));
-  $("#analyze-btn").disabled = !lib.files.length;
+  $("#analyze-btn").disabled = !hasInput();
   const multi = lib.files.length > 1;
   $("#separate").disabled = multi;
   $("#separate-field").title = multi ? "You uploaded stems, so separation isn't needed." : "";
@@ -324,6 +329,7 @@ function addFiles(fileList) {
   for (const f of fileList) {
     if (!lib.files.some((g) => g.name === f.name && g.size === f.size)) lib.files.push(f);
   }
+  if (lib.files.length) $("#link-input").value = "";  // files and a link are either/or
   renderFileList();
 }
 
@@ -350,35 +356,48 @@ async function onSttChange() {
 }
 
 async function analyze(rerun = false) {
-  if (!lib.files.length) return;
+  if (!hasInput()) return;
   const stt = sttChoice();
   if (stt === "openrouter" && !lib.sttPicker?.value) {
     $("#upload-progress").replaceChildren(el("div", { class: "msg error" }, "Pick an OpenRouter model first."));
     return;
   }
-  const fd = new FormData();
-  lib.files.forEach((f) => fd.append("files", f, f.name));
-  fd.append("language", $("#language").value);
-  fd.append("stt", stt);
-  if (stt === "openrouter") fd.append("stt_model", lib.sttPicker.value);
-  fd.append("separate", String($("#separate").checked));
-  fd.append("rerun", String(rerun));
+  const options = {
+    language: $("#language").value,
+    stt,
+    stt_model: stt === "openrouter" ? lib.sttPicker.value : null,
+    separate: $("#separate").checked,
+    rerun,
+  };
+  const link = lib.files.length ? "" : linkValue();
+  let request;
+  if (link) {
+    request = ["/api/songs/link", jsonBody("POST", { url: link, ...options })];
+  } else {
+    const fd = new FormData();
+    lib.files.forEach((f) => fd.append("files", f, f.name));
+    for (const [k, v] of Object.entries(options)) if (v != null) fd.append(k, String(v));
+    request = ["/api/songs", { method: "POST", body: fd }];
+  }
 
   const btn = $("#analyze-btn");
   btn.disabled = true;
   const box = $("#upload-progress");
-  box.replaceChildren(el("div", { class: "msg" }, "Uploading…"));
+  box.replaceChildren(el("div", { class: "msg" }, link ? "Looking up the link…" : "Uploading…"));
   try {
-    const { id } = await api("/api/songs", { method: "POST", body: fd });
+    const { id } = await api(...request);
     refreshSongs();
     await pollStatus(id, box, {
-      onDone: () => { lib.files = []; renderFileList(); box.replaceChildren(); location.hash = `#/song/${id}`; },
+      onDone: () => {
+        lib.files = []; $("#link-input").value = ""; renderFileList();
+        box.replaceChildren(); location.hash = `#/song/${id}`;
+      },
       onRetry: () => analyze(true),
     });
   } catch (e) {
     box.replaceChildren(el("div", { class: "msg error" }, e.message));
   } finally {
-    btn.disabled = !lib.files.length;
+    btn.disabled = !hasInput();
     refreshSongs();
   }
 }
@@ -427,6 +446,12 @@ function initLibrary() {
   if (savedLang) $("#language").value = savedLang;
   $("#language").addEventListener("change", (e) => store.set("mixpipe.language", e.target.value));
   $("#analyze-btn").addEventListener("click", () => analyze(false));
+  const linkInput = $("#link-input");
+  linkInput.addEventListener("input", () => {
+    if (linkValue() && lib.files.length) lib.files = [];  // files and a link are either/or
+    renderFileList();
+  });
+  linkInput.addEventListener("keydown", (e) => { if (e.key === "Enter" && hasInput()) analyze(false); });
 }
 
 // =========================================================================
@@ -518,6 +543,13 @@ function renderSong() {
   }
   if (t.timing === "approx") meta.push(el("span", { class: "badge err", title: "This model didn't return word timestamps; positions are estimated." }, "word timing approximate"));
   $("#song-meta").replaceChildren(...meta);
+  const src = song.source;
+  $("#song-source").hidden = !src;
+  if (src) {
+    $("#song-source").replaceChildren(
+      "From ", el("a", { href: src.page_url, target: "_blank", rel: "noopener noreferrer" }, src.site),
+      src.note ? ` · ${src.note}` : "");
+  }
   $("#export-cho").href = `/api/songs/${song.id}/export?fmt=cho`;
   $("#export-txt").href = `/api/songs/${song.id}/export?fmt=txt`;
   $("#polish-btn").disabled = !song.lines.length;
@@ -575,6 +607,7 @@ async function openSong(id) {
   $("#song-progress").replaceChildren();
   $("#song-title").textContent = "";
   $("#song-meta").replaceChildren();
+  $("#song-source").hidden = true;
   try {
     S.song = await api(`/api/songs/${id}`);
   } catch (e) {

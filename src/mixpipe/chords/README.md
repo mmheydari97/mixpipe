@@ -1,6 +1,7 @@
 # Chord finder
 
-Upload a song and get an editable chord sheet:
+Upload a song, or paste a link to one (YouTube, SoundCloud, Spotify, …), and
+get an editable chord sheet:
 
 - lyrics transcribed **locally** (Whisper on your Mac), editable in the page
 - chords placed on the word where they change, each with a dropdown holding the
@@ -10,8 +11,8 @@ Upload a song and get an editable chord sheet:
 - transpose, capo (with a suggestion for open guitar shapes), bar lines, and
   export to ChordPro or plain text
 
-Works with a full song (vocals + instruments), a single instrumental track, or
-several stems uploaded together.
+Works with a full song (vocals + instruments), a single instrumental track,
+several stems uploaded together, or a link.
 
 All commands below are run from the **repository root** (the folder with
 `Makefile` in it).
@@ -25,6 +26,7 @@ All commands below are run from the **repository root** (the folder with
 | macOS on Apple Silicon (M1-M4) | the default speech-to-text, `mlx-whisper`, runs on the Apple GPU. Other machines: see [Troubleshooting](#7-troubleshooting) |
 | Python **3.12** | torch, mlx and librosa don't ship wheels for 3.14 betas |
 | `ffmpeg` | decodes mp3 / m4a / aac uploads: `brew install ffmpeg` |
+| `deno` (optional) | recommended by yt-dlp for YouTube links: `brew install deno`. Without it YouTube still worked in testing but yt-dlp warns that some formats may be missing |
 | `uv` (recommended) | creates the 3.12 environment: `brew install uv` or see https://docs.astral.sh/uv/ |
 | ~3 GB free disk | torch + models |
 
@@ -45,7 +47,7 @@ uv pip install -r requirements.txt -r requirements-chords.txt
 Check it worked:
 
 ```bash
-PYTHONPATH=src python -c "import librosa, demucs.api, mlx_whisper, fastapi; print('ok')"
+PYTHONPATH=src python -c "import librosa, demucs.api, mlx_whisper, fastapi, yt_dlp; print('ok')"
 ```
 
 > Every new terminal: `source .venv/bin/activate` first.
@@ -81,13 +83,27 @@ Your browser opens **http://127.0.0.1:8765**. Stop the server with `Ctrl+C`.
    - **Several files** are treated as stems. Name them so the roles are
      obvious: `vox.wav` / `vocal.wav` feed the lyrics, `bass.wav` helps find
      slash chords, everything else feeds the chords, `drums.wav` is ignored.
+
+   **Or paste a link** in the box under it (files and a link are either/or):
+   - **YouTube, SoundCloud, Bandcamp, Vimeo** and the other sites
+     [yt-dlp supports](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md).
+   - **A direct link** to an audio file (`https://…/song.mp3`).
+   - **Spotify track links.** Spotify audio is DRM protected and can't be
+     downloaded, so the track's title, artist and length are read from the
+     Spotify page and the YouTube upload closest in length is used instead.
+     The song page says which upload it picked; if it's the wrong version,
+     paste a YouTube link yourself.
+   - One song per link: playlists, albums and live streams are refused, and
+     so is anything over 30 minutes.
+   - Downloading may be against a site's terms of service. Use it for music
+     you're allowed to download.
 2. **Lyrics language**: Auto-detect, a specific language (better accuracy,
    Persian and Arabic display right-to-left), or *No lyrics (instrumental)*.
 3. **Transcription**: *Local Whisper* (free, private, default) or *OpenRouter*
    (see [section 5](#5-optional-openrouter)).
 4. Keep **Separate vocals and drums first** ticked for full songs.
-5. Press **Analyze** and watch the stages: Decode → Separate → Lyrics →
-   Chords → Align. Time grows with song length; a 40-second test song took
+5. Press **Analyze** and watch the stages: (Download →) Decode → Separate →
+   Lyrics → Chords → Align. Time grows with song length; a 40-second test song took
    about 25 s on an M4 Pro (after the first-run downloads).
 
 **On the chord sheet:**
@@ -124,6 +140,9 @@ make chords FILE="path/to/song.m4a" LANG_CODE=en
 PYTHONPATH=src python -m mixpipe.cli chords path/to/song.m4a --lang en
 # stems: list several files
 PYTHONPATH=src python -m mixpipe.cli chords vox.wav guitar.wav bass.wav
+# a link instead of a file (quote it: links often contain & or ?)
+make chords FILE="https://www.youtube.com/watch?v=..." LANG_CODE=en
+PYTHONPATH=src python -m mixpipe.cli chords "https://open.spotify.com/track/..."
 ```
 
 | Flag | Default | |
@@ -132,7 +151,7 @@ PYTHONPATH=src python -m mixpipe.cli chords vox.wav guitar.wav bass.wav
 | `--stt` | `mlx` | `mlx` = local Whisper, `openrouter` = cloud |
 | `--stt-model` | | OpenRouter model id, required with `--stt openrouter` (e.g. `openai/whisper-large-v3-turbo`) |
 | `--no-separate` | off | skip Demucs on a single full-mix file |
-| `--title` | file name | song title |
+| `--title` | file name / link title | song title |
 | `--out` | `out/chords` | song store directory |
 | `--quiet` | off | no progress output |
 
@@ -161,8 +180,8 @@ approximate*. Polish lyrics sends only the lyric text, never audio.
 
 ```
 out/chords/<song-id>/
-  meta.json         title, upload date, input file names
-  inputs/           your uploaded files, untouched
+  meta.json         title, upload date, input file names, and the link it came from
+  inputs/           your uploaded files, or the downloaded audio.m4a, untouched
   mix.flac          playback audio (only for multi-file or non-browser formats)
   separated/        vocals / bass / other / drums from Demucs
   transcript.json   cached lyrics
@@ -172,7 +191,8 @@ out/chords/<song-id>/
 ```
 
 - Separation and transcription are cached, so re-runs are quick.
-- Uploading the same file again opens the existing sheet and keeps your edits.
+- Uploading the same file (or pasting the same link) again opens the existing
+  sheet and keeps your edits.
 - Delete a song with **Delete** in the song list (click twice), or remove its
   folder.
 
@@ -183,6 +203,9 @@ out/chords/<song-id>/
 | `pip` can't find wheels for torch / mlx / numba | the venv isn't Python 3.12: `python --version`, then recreate it as in step 2 |
 | `No module named mixpipe` | run from the repo root with `PYTHONPATH=src`, or use the `make` targets |
 | `can't decode this format without ffmpeg` | `brew install ffmpeg` |
+| `downloading from links needs yt-dlp` | `uv pip install -r requirements-chords.txt` again |
+| a YouTube link fails with *Sign in to confirm you're not a bot* or a format error | update yt-dlp (`uv pip install -U yt-dlp`; YouTube changes often), install `deno`, or download the audio yourself and upload the file |
+| a Spotify link picked the wrong version (live, cover, …) | paste the YouTube link of the version you want instead |
 | first transcription seems stuck | it's downloading Whisper (~1.6 GB) once |
 | `You are sending unauthenticated requests to the HF Hub` | harmless; setting `HF_TOKEN` only speeds up the download |
 | `address already in use` | another server is on 8765: `... chords-ui --port 8766` |

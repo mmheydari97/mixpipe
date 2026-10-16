@@ -91,11 +91,17 @@ button.danger { color: var(--danger); }
   display: inline-flex; align-items: center; gap: 6px; font-size: .9em;
 }
 .file-list button { padding: 0 6px; border: 0; background: transparent; color: var(--muted); }
+.or { display: flex; align-items: center; gap: 10px; margin: 14px 0 10px; color: var(--muted); font-size: .85em; }
+.or::before, .or::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
+.link-field small { font-size: .8em; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.source { font-size: .85em; color: var(--muted); margin: -4px 0 10px; }
+.source a { color: inherit; }
 
 .options { display: grid; gap: 14px; margin-top: 16px; }
 .field { display: grid; gap: 6px; }
 .field > span { font-weight: 600; font-size: .9em; }
-select, input[type=text], input[type=search], textarea {
+select, input[type=text], input[type=search], input[type=url], textarea {
   font: inherit; color: var(--text); background: var(--bg);
   border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; width: 100%;
 }
