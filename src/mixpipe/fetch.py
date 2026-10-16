@@ -30,6 +30,10 @@ UA = "Mozilla/5.0 (compatible; mixpipe-chords)"
 _VERSION_WORDS = ("live", "cover", "karaoke", "remix", "instrumental", "acoustic",
                   "sped up", "slowed", "8d", "reverb", "nightcore", "lyrics video")
 
+# yt-dlp's extractor keys, spelled the way the sites spell themselves
+SITE_NAMES = {"Youtube": "YouTube", "YoutubeTab": "YouTube", "Soundcloud": "SoundCloud",
+              "BandcampTrack": "Bandcamp", "Bandcamp": "Bandcamp"}
+
 YDL_HINT = "downloading from links needs yt-dlp: pip install -r requirements-chords.txt"
 
 
@@ -241,9 +245,12 @@ def resolve(url: str) -> dict:
     if info.get("track") and (info.get("artist") or info.get("creator")):
         title = f"{info.get('artist') or info.get('creator')} - {info['track']}"
     page = info.get("webpage_url") or url
+    site = info.get("extractor_key") or "Generic"
+    if site == "Generic":  # a direct file or an embed: name the host instead
+        site = urlparse(page).netloc.removeprefix("www.") or "link"
     return {
         "url": url, "page_url": page, "download_url": page,
-        "site": info.get("extractor_key") or "link", "title": title,
+        "site": SITE_NAMES.get(site, site), "title": title,
         "duration": info.get("duration"), "note": None,
     }
 

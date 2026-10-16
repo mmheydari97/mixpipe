@@ -704,7 +704,7 @@ SPOTIFY_PAGE = """<html><head><title>Song | Spotify</title>
 
 
 def test_parse_spotify_page():
-    from mixpipe.chords.fetch import parse_spotify_page
+    from mixpipe.fetch import parse_spotify_page
 
     assert parse_spotify_page(SPOTIFY_PAGE) == {
         "title": "Don't Stop Me Now", "artist": "Queen", "duration": 209.0}
@@ -713,7 +713,7 @@ def test_parse_spotify_page():
 
 
 def test_spotify_match_prefers_same_recording():
-    from mixpipe.chords.fetch import pick_match
+    from mixpipe.fetch import pick_match
 
     track = {"title": "Don't Stop Me Now", "artist": "Queen", "duration": 209.0}
     results = [
@@ -726,7 +726,7 @@ def test_spotify_match_prefers_same_recording():
 
 
 def test_link_checks():
-    from mixpipe.chords.fetch import FetchError, _clean_error, check_url, is_spotify
+    from mixpipe.fetch import FetchError, _clean_error, check_url, is_spotify
 
     for bad in ("", "youtube.com/watch?v=x", "ftp://host/a.mp3", "file:///etc/passwd"):
         with pytest.raises(FetchError):
@@ -740,34 +740,7 @@ def test_link_checks():
     assert _clean_error(Exception("ERROR: [youtube] abc: Video unavailable")) == "Video unavailable"
 
 
-def _fake_link(wav: bytes):
-    calls = {"resolve": 0, "download": 0, "fail": False}
-
-    def resolver(url):
-        from mixpipe.chords.fetch import FetchError
-
-        calls["resolve"] += 1
-        if "playlist" in url:
-            raise FetchError("that's a playlist or album; paste a link to a single song")
-        return {"url": url, "page_url": "https://www.youtube.com/watch?v=abc",
-                "download_url": "https://www.youtube.com/watch?v=abc", "site": "Youtube",
-                "title": "Some Band - Some Song", "duration": 16.0, "note": None}
-
-    def downloader(source, dest, progress=None):
-        from mixpipe.chords.fetch import FetchError
-
-        calls["download"] += 1
-        if calls["fail"]:
-            raise FetchError("download failed: Video unavailable")
-        progress(0.5, "downloading")
-        path = Path(dest) / "audio.wav"
-        path.write_bytes(wav)
-        return path
-
-    return calls, resolver, downloader
-
-
-def test_api_link_flow(tmp_path, progression_audio):
+def test_api_link_flow(tmp_path, progression_audio, fake_link):
     from fastapi.testclient import TestClient
 
     import soundfile as sf
@@ -776,7 +749,7 @@ def test_api_link_flow(tmp_path, progression_audio):
 
     buf = io.BytesIO()
     sf.write(buf, progression_audio, SR, format="WAV")
-    calls, resolver, downloader = _fake_link(buf.getvalue())
+    calls, resolver, downloader = fake_link(buf.getvalue())
     client = TestClient(create_app(tmp_path, separator=fake_separator,
                                    transcriber=fake_transcriber, run_inline=True,
                                    resolver=resolver, downloader=downloader))
@@ -812,7 +785,7 @@ def test_api_link_flow(tmp_path, progression_audio):
     assert client.get(f"/api/songs/{r.json()['id']}/status").json()["from_url"] is False
 
 
-def test_api_link_download_failure_then_retry(tmp_path, progression_audio):
+def test_api_link_download_failure_then_retry(tmp_path, progression_audio, fake_link):
     from fastapi.testclient import TestClient
 
     import soundfile as sf
@@ -821,7 +794,7 @@ def test_api_link_download_failure_then_retry(tmp_path, progression_audio):
 
     buf = io.BytesIO()
     sf.write(buf, progression_audio, SR, format="WAV")
-    calls, resolver, downloader = _fake_link(buf.getvalue())
+    calls, resolver, downloader = fake_link(buf.getvalue())
     client = TestClient(create_app(tmp_path, separator=fake_separator,
                                    transcriber=fake_transcriber, run_inline=True,
                                    resolver=resolver, downloader=downloader))

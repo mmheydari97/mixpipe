@@ -8,6 +8,8 @@ equal to mixpipe.SAMPLE_RATE.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +29,9 @@ except ImportError:  # pragma: no cover
 
 
 AUDIO_EXTS = {".wav", ".wave", ".flac", ".aiff", ".aif", ".ogg"}
+# what decode() takes (via ffmpeg for the compressed ones)
+UPLOAD_EXTS = AUDIO_EXTS | {".mp3", ".m4a", ".aac", ".mp4", ".opus", ".webm", ".wma"}
+WORK_SR = 44_100  # Demucs' native rate; the song tools bring everything here first
 
 
 @dataclass
@@ -123,6 +128,30 @@ def read_audio(path: str | os.PathLike) -> tuple[np.ndarray, int]:
             f"{path}: only WAV is supported without soundfile installed."
         )
     return _read_wave_stdlib(path)
+
+
+def decode(path: str | os.PathLike) -> tuple[np.ndarray, int]:
+    """Read any audio file: soundfile first, ffmpeg for everything else (m4a...)."""
+    path = Path(path)
+    try:
+        return read_audio(path)
+    except Exception:  # noqa: BLE001 - fall through to ffmpeg
+        pass
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError(
+            f"{path.name}: can't decode this format without ffmpeg (brew install ffmpeg)"
+        )
+    proc = subprocess.run(
+        [ffmpeg, "-v", "error", "-i", str(path), "-f", "f32le", "-ac", "2",
+         "-ar", str(WORK_SR), "-"],
+        capture_output=True, check=False,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        raise RuntimeError(f"{path.name}: ffmpeg could not decode it: "
+                           f"{proc.stderr.decode(errors='replace')[:200]}")
+    audio = np.frombuffer(proc.stdout, dtype="<f4").reshape(-1, 2)
+    return audio.copy(), WORK_SR
 
 
 def to_sample_rate(audio: np.ndarray, sr: int, target: int = SAMPLE_RATE) -> np.ndarray:

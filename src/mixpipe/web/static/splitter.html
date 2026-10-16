@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MixPipe Splitter</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23b4441f'/%3E%3Cg fill='white'%3E%3Crect x='7' y='9' width='3' height='15' rx='1.5'/%3E%3Crect x='14.5' y='6' width='3' height='18' rx='1.5'/%3E%3Crect x='22' y='12' width='3' height='12' rx='1.5'/%3E%3C/g%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/common.css">
+  <link rel="stylesheet" href="/static/splitter.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">mixpipe <span>splitter</span></a>
+  </header>
+
+  <main>
+    <!-- ================= library ================= -->
+    <section id="library-view" hidden>
+      <div class="card upload">
+        <h2>New song</h2>
+        <div id="source-picker"></div>
+        <div class="actions">
+          <button id="split-btn" class="primary" disabled>Split</button>
+        </div>
+        <div id="upload-progress"></div>
+      </div>
+
+      <div class="card">
+        <h2>Songs</h2>
+        <ul id="song-list" class="song-list"><li class="muted">Nothing here yet.</li></ul>
+      </div>
+    </section>
+
+    <!-- ================= mixer ================= -->
+    <section id="mixer-view" hidden>
+      <div class="song-head">
+        <a href="#/" class="back">← Songs</a>
+        <h1 id="song-title"></h1>
+        <p id="song-source" class="source" hidden></p>
+      </div>
+
+      <div id="mixer-progress"></div>
+
+      <div id="mixer" hidden>
+        <div class="card">
+          <div class="card-head">
+            <h2>Channels</h2>
+            <div class="presets" role="group" aria-label="Presets">
+              <button data-preset="all">Everything</button>
+              <button data-preset="no-vocals">No vocals</button>
+              <button data-preset="no-guitar">No guitar</button>
+              <button data-preset="guitar-only">Guitar only</button>
+              <button data-preset="vocals-only">Vocals only</button>
+            </div>
+          </div>
+          <div id="strips" class="strips"></div>
+          <p class="muted small">Separation isn't perfect: a little of each instrument leaks into the
+            others, acoustic guitar partly lands in <i>Other</i>, and <i>Keys</i> is the weakest channel.</p>
+        </div>
+
+        <div class="card practice">
+          <div class="group">
+            <label class="lbl" for="speed">Speed</label>
+            <select id="speed"></select>
+            <span class="muted small">same pitch</span>
+          </div>
+          <div class="group" role="group" aria-label="A-B loop">
+            <span class="lbl">Loop</span>
+            <button id="set-a" title="Set loop start to the current time ( [ )">Set A <output id="a-val">–</output></button>
+            <button id="set-b" title="Set loop end to the current time ( ] )">Set B <output id="b-val">–</output></button>
+            <label class="check small"><input id="loop-on" type="checkbox"> Loop A–B <kbd>L</kbd></label>
+            <button id="loop-clear" class="link">clear</button>
+          </div>
+          <div class="group">
+            <span class="lbl">Download this mix</span>
+            <select id="fmt" aria-label="Format">
+              <option value="mp3">MP3</option>
+              <option value="wav">WAV</option>
+            </select>
+            <button id="download-btn">Download</button>
+            <span id="download-msg" class="muted small"></span>
+          </div>
+        </div>
+        <p class="muted small keys">Keys: <kbd>Space</kbd> play/pause · <kbd>←</kbd>/<kbd>→</kbd> 5 s ·
+          <kbd>[</kbd> / <kbd>]</kbd> set A / B · <kbd>L</kbd> loop on/off</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="transport" id="transport" hidden>
+    <button id="play-btn" class="primary play" aria-label="Play">▶</button>
+    <output id="time-cur" class="time">0:00</output>
+    <div class="seek">
+      <div id="loop-band" class="loop-band" hidden></div>
+      <input id="seek" type="range" min="0" max="1" step="0.01" value="0" aria-label="Position">
+    </div>
+    <output id="time-dur" class="time">0:00</output>
+    <label class="master" title="Master volume">
+      <span class="sr-only">Master volume</span>🔊
+      <input id="master" type="range" min="0" max="1" step="0.01" value="1">
+    </label>
+  </footer>
+
+  <script src="/static/common.js"></script>
+  <script src="/static/splitter.js"></script>
+</body>
+</html>

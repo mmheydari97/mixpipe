@@ -4,42 +4,7 @@
 // helpers
 // =========================================================================
 
-const $ = (sel, root = document) => root.querySelector(sel);
-const el = (tag, attrs = {}, ...children) => {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v == null || v === false) continue;
-    if (k === "class") node.className = v;
-    else if (k === "dataset") Object.assign(node.dataset, v);
-    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
-    else node.setAttribute(k, v === true ? "" : v);
-  }
-  for (const c of children.flat()) {
-    if (c == null || c === false) continue;
-    node.append(c instanceof Node ? c : document.createTextNode(String(c)));
-  }
-  return node;
-};
-
-async function api(path, opts = {}) {
-  const res = await fetch(path, opts);
-  if (!res.ok) {
-    let detail = res.statusText;
-    try { detail = (await res.json()).detail || detail; } catch { /* not json */ }
-    const err = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
-    err.status = res.status;
-    throw err;
-  }
-  return res.json();
-}
-const jsonBody = (method, data) => ({
-  method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
-});
-
-const store = {
-  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
-  set(k, v) { try { localStorage.setItem(k, v); } catch { /* storage unavailable */ } },
-};
+// $, el, api, jsonBody, store: common.js
 
 const fmtTime = (t) => {
   const m = Math.floor(t / 60);
@@ -267,70 +232,21 @@ function createModelPicker(container, kind, { placeholder, initialQuery = "", on
 // progress panel
 // =========================================================================
 
-const STAGES_FILE = ["decode", "separate", "transcribe", "chords", "align"];
-const STAGES_LINK = ["download", ...STAGES_FILE];
-const STAGE_LABEL = { download: "Download", decode: "Decode", separate: "Separate", transcribe: "Lyrics", chords: "Chords", align: "Align" };
-
-function renderProgress(container, st, { onRetry } = {}) {
-  const STAGES = st.from_url ? STAGES_LINK : STAGES_FILE;
-  const idx = STAGES.indexOf(st.stage);
-  const overall = st.state === "done" ? 1 : Math.max(0, (idx + (st.progress || 0)) / STAGES.length);
-  const pills = STAGES.map((s, i) => el("span", {
-    class: "stage " + (st.state === "done" || i < idx ? "done" : i === idx ? "current" : ""),
-  }, STAGE_LABEL[s]));
-  const parts = [
-    el("div", { class: "stages" }, pills),
-    el("div", { class: "bar" }, el("div", { style: `width:${(overall * 100).toFixed(1)}%` })),
-  ];
-  if (st.state === "error") {
-    parts.push(el("div", { class: "msg error" }, `Failed during ${STAGE_LABEL[st.stage] || st.stage}: ${st.error}`));
-    if (onRetry) parts.push(el("div", { class: "actions" }, el("button", { onclick: onRetry }, "Retry")));
-  } else {
-    parts.push(el("div", { class: "msg" }, st.state === "queued" ? "Queued…" : st.message || ""));
-  }
-  container.replaceChildren(el("div", { class: "progress" }, parts));
-}
-
-async function pollStatus(id, container, { onDone, onRetry } = {}) {
-  for (;;) {
-    let st;
-    try { st = await api(`/api/songs/${id}/status`); } catch (e) {
-      container.replaceChildren(el("div", { class: "msg error" }, e.message));
-      return;
-    }
-    renderProgress(container, st, { onRetry });
-    if (st.state === "done") { onDone?.(); return; }
-    if (st.state === "error") return;
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-}
+const { stageLabel, pollStatus } = createJobUI(
+  ["decode", "separate", "transcribe", "chords", "align"],
+  { decode: "Decode", separate: "Separate", transcribe: "Lyrics", chords: "Chords", align: "Align" });
 
 // =========================================================================
 // library view
 // =========================================================================
 
-const lib = { files: [], sttPicker: null, hasKey: null };
+const lib = { picker: null, sttPicker: null, hasKey: null };
 
-const linkValue = () => $("#link-input").value.trim();
-const hasInput = () => lib.files.length > 0 || linkValue() !== "";
-
-function renderFileList() {
-  const ul = $("#file-list");
-  ul.replaceChildren(...lib.files.map((f, i) => el("li", {}, f.name,
-    el("button", { title: "Remove", "aria-label": `Remove ${f.name}`,
-      onclick: (e) => { e.preventDefault(); lib.files.splice(i, 1); renderFileList(); } }, "×"))));
-  $("#analyze-btn").disabled = !hasInput();
-  const multi = lib.files.length > 1;
+function onSourceChange(picker) {
+  $("#analyze-btn").disabled = !picker.hasInput();
+  const multi = picker.files.length > 1;
   $("#separate").disabled = multi;
   $("#separate-field").title = multi ? "You uploaded stems, so separation isn't needed." : "";
-}
-
-function addFiles(fileList) {
-  for (const f of fileList) {
-    if (!lib.files.some((g) => g.name === f.name && g.size === f.size)) lib.files.push(f);
-  }
-  if (lib.files.length) $("#link-input").value = "";  // files and a link are either/or
-  renderFileList();
 }
 
 async function orStatus() {
@@ -356,29 +272,21 @@ async function onSttChange() {
 }
 
 async function analyze(rerun = false) {
-  if (!hasInput()) return;
+  const picker = lib.picker;
+  if (!picker.hasInput()) return;
   const stt = sttChoice();
   if (stt === "openrouter" && !lib.sttPicker?.value) {
     $("#upload-progress").replaceChildren(el("div", { class: "msg error" }, "Pick an OpenRouter model first."));
     return;
   }
-  const options = {
+  const link = picker.link;
+  const request = picker.request({
     language: $("#language").value,
     stt,
     stt_model: stt === "openrouter" ? lib.sttPicker.value : null,
     separate: $("#separate").checked,
     rerun,
-  };
-  const link = lib.files.length ? "" : linkValue();
-  let request;
-  if (link) {
-    request = ["/api/songs/link", jsonBody("POST", { url: link, ...options })];
-  } else {
-    const fd = new FormData();
-    lib.files.forEach((f) => fd.append("files", f, f.name));
-    for (const [k, v] of Object.entries(options)) if (v != null) fd.append(k, String(v));
-    request = ["/api/songs", { method: "POST", body: fd }];
-  }
+  });
 
   const btn = $("#analyze-btn");
   btn.disabled = true;
@@ -388,70 +296,34 @@ async function analyze(rerun = false) {
     const { id } = await api(...request);
     refreshSongs();
     await pollStatus(id, box, {
-      onDone: () => {
-        lib.files = []; $("#link-input").value = ""; renderFileList();
-        box.replaceChildren(); location.hash = `#/song/${id}`;
-      },
+      onDone: () => { picker.clear(); box.replaceChildren(); location.hash = `#/song/${id}`; },
       onRetry: () => analyze(true),
     });
   } catch (e) {
     box.replaceChildren(el("div", { class: "msg error" }, e.message));
   } finally {
-    btn.disabled = !hasInput();
+    btn.disabled = !picker.hasInput();
     refreshSongs();
   }
 }
 
-async function refreshSongs() {
-  const ul = $("#song-list");
-  let songs;
-  try { songs = await api("/api/songs"); } catch (e) {
-    ul.replaceChildren(el("li", { class: "muted" }, e.message));
-    return;
-  }
-  if (!songs.length) { ul.replaceChildren(el("li", { class: "muted" }, "Nothing analysed yet.")); return; }
-  ul.replaceChildren(...songs.map((s) => {
-    const st = s.status || {};
-    const badge = st.state === "done" ? el("span", { class: "badge ok" }, "ready")
-      : st.state === "error" ? el("span", { class: "badge err" }, "failed")
-      : el("span", { class: "badge" }, st.state === "running" ? STAGE_LABEL[st.stage] + "…" : st.state);
-    const del = el("button", { class: "danger", title: "Delete song" }, "Delete");
-    del.addEventListener("click", async () => {
-      if (del.dataset.armed !== "1") {
-        del.dataset.armed = "1"; del.textContent = "Really delete?";
-        setTimeout(() => { del.dataset.armed = ""; del.textContent = "Delete"; }, 3000);
-        return;
-      }
-      await api(`/api/songs/${s.id}`, { method: "DELETE" });
-      refreshSongs();
-    });
-    return el("li", {},
-      el("a", { href: `#/song/${s.id}` }, s.title),
-      badge,
-      el("span", { class: "badge" }, new Date(s.created * 1000).toLocaleDateString()),
-      del);
-  }));
+function refreshSongs() {
+  return refreshSongList($("#song-list"), { stageLabel, href: (s) => `#/song/${s.id}` });
 }
 
 function initLibrary() {
-  const dz = $("#dropzone");
-  const input = $("#file-input");
-  dz.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); } });
-  input.addEventListener("change", () => { addFiles(input.files); input.value = ""; });
-  ["dragenter", "dragover"].forEach((t) => dz.addEventListener(t, (e) => { e.preventDefault(); dz.classList.add("over"); }));
-  ["dragleave", "drop"].forEach((t) => dz.addEventListener(t, (e) => { e.preventDefault(); dz.classList.remove("over"); }));
-  dz.addEventListener("drop", (e) => addFiles(e.dataTransfer.files));
+  lib.picker = createSourcePicker($("#source-picker"), {
+    multiple: true,
+    hint: "One file = a full song (vocals are separated automatically). Several files = stems: "
+      + "name them like vox.wav, bass.wav, guitar.wav so vocals feed the lyrics and the rest feeds the chords.",
+    onChange: onSourceChange,
+    onSubmit: () => analyze(false),
+  });
   document.querySelectorAll("input[name=stt]").forEach((r) => r.addEventListener("change", onSttChange));
   const savedLang = store.get("mixpipe.language");
   if (savedLang) $("#language").value = savedLang;
   $("#language").addEventListener("change", (e) => store.set("mixpipe.language", e.target.value));
   $("#analyze-btn").addEventListener("click", () => analyze(false));
-  const linkInput = $("#link-input");
-  linkInput.addEventListener("input", () => {
-    if (linkValue() && lib.files.length) lib.files = [];  // files and a link are either/or
-    renderFileList();
-  });
-  linkInput.addEventListener("keydown", (e) => { if (e.key === "Enter" && hasInput()) analyze(false); });
 }
 
 // =========================================================================

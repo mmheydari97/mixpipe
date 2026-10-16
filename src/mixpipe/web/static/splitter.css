@@ -1,0 +1,64 @@
+/* Splitter only; common.css loads first. */
+
+.small { font-size: .85em; }
+input[type=range] { accent-color: var(--accent); }
+
+.song-head { margin-bottom: 12px; }
+.card-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.card-head h2 { margin: 0; }
+.presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.presets button { padding: 3px 10px; font-size: .9em; }
+
+/* ---------- channel strips ---------- */
+.strips { display: grid; gap: 4px; }
+.strip {
+  display: grid; grid-template-columns: 7rem auto auto 1fr 3.5rem; align-items: center; gap: 10px;
+  padding: 8px 10px; border-radius: 8px; background: var(--bg);
+}
+.strip .name { font-weight: 600; }
+.strip button { padding: 2px 9px; font-size: .8em; font-weight: 700; min-width: 2.2rem; justify-content: center; }
+.strip button[aria-pressed=true].mute { background: var(--danger); border-color: var(--danger); color: #fff; }
+.strip button[aria-pressed=true].solo { background: var(--warn); border-color: var(--warn); color: #fff; }
+.strip input[type=range] { width: 100%; }
+.strip output { font-family: var(--mono); font-size: .85em; text-align: right; color: var(--muted); }
+.strip.silent .name, .strip.silent input { opacity: .45; }
+
+/* ---------- practice controls ---------- */
+.practice { display: flex; flex-wrap: wrap; gap: 14px 28px; align-items: center; }
+.practice .group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.practice .lbl { font-size: .8em; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.practice button { padding: 3px 10px; }
+.practice select { min-width: 0; width: auto; padding: 4px 8px; }
+.practice output { font-family: var(--mono); font-size: .9em; color: var(--muted); }
+.keys { margin-top: -6px; }
+
+/* ---------- transport ---------- */
+.transport {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: flex; gap: 12px; align-items: center;
+  padding: 12px 16px; background: var(--surface); border-top: 1px solid var(--border);
+}
+.transport .play { width: 44px; height: 44px; border-radius: 50%; justify-content: center; font-size: 1.1em; padding: 0; flex: none; }
+.transport .time { font-family: var(--mono); font-size: .9em; color: var(--muted); min-width: 4.5ch; text-align: center; }
+.seek { position: relative; flex: 1; min-width: 0; display: flex; align-items: center; }
+.seek input { width: 100%; position: relative; z-index: 1; background: transparent; }
+.loop-band {
+  position: absolute; top: 50%; height: 14px; transform: translateY(-50%);
+  background: var(--accent-soft); border-left: 2px solid var(--accent); border-right: 2px solid var(--accent);
+  border-radius: 3px; pointer-events: none;
+}
+.master { display: flex; align-items: center; gap: 6px; flex: none; }
+.master input { width: 90px; }
+
+@media (max-width: 640px) {
+  .strip { grid-template-columns: 1fr auto auto; grid-template-areas: "name mute solo" "vol vol pct"; row-gap: 4px; }
+  .strip .name { grid-area: name; }
+  .strip .mute { grid-area: mute; }
+  .strip .solo { grid-area: solo; }
+  .strip input[type=range] { grid-area: vol; }
+  .strip output { grid-area: pct; }
+  .transport { flex-wrap: wrap; gap: 8px; }
+  .seek { order: 5; flex-basis: 100%; }
+  .master input { width: 70px; }
+  body { padding-bottom: 120px; }
+  .practice { gap: 12px; }
+}

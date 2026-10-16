@@ -1,7 +1,7 @@
 """Song store and the analysis pipeline: (download ->) decode -> separate ->
 transcribe -> chords -> align.
 
-Each song lives in out/chords/<song_id>/:
+Each song lives in out/chords/<song_id>/ (folder layout and ids: songstore.py):
 
   meta.json        id, title, created, input file names, source (songs from a link)
   inputs/          the uploaded or downloaded files, untouched
@@ -18,17 +18,16 @@ re-transcribing with another model doesn't redo separation.
 
 from __future__ import annotations
 
-import hashlib
 import json
-import re
-import time
 from pathlib import Path
 from typing import Callable
 
 import numpy as np
 
-from .fetch import FetchError, song_key
-from .ingest import UPLOAD_EXTS, WORK_SR, Ingested, ingest
+from .. import songstore
+from ..songstore import (Progress, _write_json, download_inputs, get_status, list_songs,
+                         new_song, new_song_from_url, set_status)
+from .ingest import WORK_SR, Ingested, ingest
 from .sheet import SHEET_VERSION, load_sheet, save_sheet
 
 DEFAULT_ROOT = Path("out/chords")
@@ -43,105 +42,9 @@ DEFAULT_OPTIONS = {
     "separate": True,     # run Demucs on a single full-mix upload
 }
 
-Progress = Callable[[str, float, str], None]
-
-
 # --------------------------------------------------------------------------- #
-# store
+# OpenRouter capabilities learned from past runs
 # --------------------------------------------------------------------------- #
-
-
-def _slug(text: str) -> str:
-    s = re.sub(r"[^\w-]+", "-", text.strip().lower(), flags=re.UNICODE).strip("-")
-    return s[:40] or "song"
-
-
-def _safe_name(name: str) -> str:
-    name = Path(name).name
-    return re.sub(r"[^\w.\- ]+", "_", name, flags=re.UNICODE) or "audio"
-
-
-def new_song(files: list[tuple[str, bytes]], root: Path = DEFAULT_ROOT,
-             title: str | None = None) -> str:
-    """Store uploaded files as a new song. Returns its id."""
-    if not files:
-        raise ValueError("no files uploaded")
-    for name, _ in files:
-        if Path(name).suffix.lower() not in UPLOAD_EXTS:
-            raise ValueError(f"{name}: unsupported file type")
-    digest = hashlib.sha1()
-    for name, data in files:
-        digest.update(name.encode())
-        digest.update(data)
-    title = title or Path(files[0][0]).stem
-    song_id = f"{_slug(title)}-{digest.hexdigest()[:6]}"
-    song_dir = Path(root) / song_id
-    (song_dir / "inputs").mkdir(parents=True, exist_ok=True)
-    names = []
-    for name, data in files:
-        safe = _safe_name(name)
-        (song_dir / "inputs" / safe).write_bytes(data)
-        names.append(safe)
-    _write_json(song_dir / "meta.json", {
-        "id": song_id, "title": title, "created": time.time(), "inputs": names,
-    })
-    set_status(song_dir, "queued", "decode", 0.0, "waiting")
-    return song_id
-
-
-def new_song_from_url(source: dict, root: Path = DEFAULT_ROOT,
-                      title: str | None = None) -> str:
-    """Register a song from a resolved link (see fetch.resolve). The audio is
-    downloaded by analyze(), in the background. Returns its id."""
-    title = title or source.get("title") or "song"
-    slug = re.sub(r"-{2,}", "-", _slug(title))  # "Artist - Song" -> artist-song
-    song_id = f"{slug}-{song_key(source)[:6]}"
-    song_dir = Path(root) / song_id
-    (song_dir / "inputs").mkdir(parents=True, exist_ok=True)
-    meta_path = song_dir / "meta.json"
-    if not meta_path.exists():
-        _write_json(meta_path, {
-            "id": song_id, "title": title, "created": time.time(), "inputs": [],
-            "source": source,
-        })
-        set_status(song_dir, "queued", "download", 0.0, "waiting")
-    return song_id
-
-
-def list_songs(root: Path = DEFAULT_ROOT) -> list[dict]:
-    root = Path(root)
-    if not root.is_dir():
-        return []
-    songs = []
-    for meta_path in root.glob("*/meta.json"):
-        meta = json.loads(meta_path.read_text())
-        meta["status"] = get_status(meta_path.parent)
-        songs.append(meta)
-    return sorted(songs, key=lambda m: m.get("created", 0), reverse=True)
-
-
-def set_status(song_dir: Path, state: str, stage: str, progress: float,
-               message: str = "", error: str | None = None) -> None:
-    _write_json(Path(song_dir) / "status.json", {
-        "state": state, "stage": stage, "progress": round(progress, 3),
-        "message": message, "error": error, "updated": time.time(),
-    })
-
-
-def get_status(song_dir: Path) -> dict:
-    path = Path(song_dir) / "status.json"
-    if not path.exists():
-        return {"state": "unknown"}
-    status = json.loads(path.read_text())
-    meta_path = Path(song_dir) / "meta.json"
-    status["from_url"] = meta_path.exists() and "source" in json.loads(meta_path.read_text())
-    return status
-
-
-def _write_json(path: Path, data) -> None:
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=1, ensure_ascii=False))
-    tmp.replace(path)
 
 
 def _caps_path(root: Path) -> Path:
@@ -218,20 +121,11 @@ def analyze(
     song_dir = Path(song_dir)
     root = Path(root) if root else song_dir.parent
     opts = {**DEFAULT_OPTIONS, **(options or {})}
-    meta = json.loads((song_dir / "meta.json").read_text())
     report = progress or (lambda stage, frac, msg: None)
 
     # ---- download (songs from a link) -----------------------------------------
+    meta = download_inputs(song_dir, report, downloader)
     source = meta.get("source")
-    if source and not meta["inputs"]:
-        report("download", 0.0, f"fetching from {source['site']}")
-        if downloader is None:
-            from .fetch import download as downloader
-        path = downloader(source, song_dir / "inputs",
-                          progress=lambda f, msg: report("download", f, msg))
-        meta["inputs"] = [path.name]
-        _write_json(song_dir / "meta.json", meta)
-        report("download", 1.0, f"downloaded {path.stat().st_size / 1e6:.1f} MB")
 
     # ---- decode ---------------------------------------------------------------
     report("decode", 0.0, "decoding audio")
@@ -351,25 +245,9 @@ def _write_stereo(path: Path, audio: np.ndarray, sr: int) -> None:
 
 def run_job(song_dir: Path, options: dict | None = None, **kwargs) -> dict | None:
     """analyze() with status.json bookkeeping; never raises."""
-    song_dir = Path(song_dir)
-    last = {"t": 0.0}
-
-    def progress(stage: str, frac: float, msg: str) -> None:
-        now = time.monotonic()
-        if frac in (0.0, 1.0) or now - last["t"] > 0.5:
-            last["t"] = now
-            set_status(song_dir, "running", stage, frac, msg)
-
-    try:
-        sheet = analyze(song_dir, options, progress=progress, **kwargs)
-    except Exception as exc:  # noqa: BLE001 - surface any failure to the UI
-        st = get_status(song_dir)
-        error = str(exc) if isinstance(exc, FetchError) else f"{type(exc).__name__}: {exc}"
-        set_status(song_dir, "error", st.get("stage", "decode"), st.get("progress", 0.0),
-                   "failed", error=error)
-        return None
-    set_status(song_dir, "done", "align", 1.0, "done")
-    return sheet
+    return songstore.run_job(
+        song_dir, lambda progress: analyze(song_dir, options, progress=progress, **kwargs),
+        done_stage="align")
 
 
 __all__ = ["DEFAULT_ROOT", "STAGES", "analyze", "run_job", "new_song", "new_song_from_url",

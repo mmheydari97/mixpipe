@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MixPipe Chords</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23b4441f'/%3E%3Ctext x='16' y='22' font-family='Menlo,monospace' font-size='15' font-weight='700' fill='white' text-anchor='middle'%3EAm%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/common.css">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -17,22 +18,7 @@
     <section id="library-view" hidden>
       <div class="card upload">
         <h2>New song</h2>
-        <label id="dropzone" class="dropzone" tabindex="0">
-          <input id="file-input" type="file" accept="audio/*,.m4a,.flac,.aiff,.aif,.opus" multiple hidden>
-          <strong>Drop audio here</strong> or click to choose
-          <small>One file = a full song (vocals are separated automatically).
-            Several files = stems: name them like <code>vox.wav</code>, <code>bass.wav</code>,
-            <code>guitar.wav</code> so vocals feed the lyrics and the rest feeds the chords.</small>
-        </label>
-        <ul id="file-list" class="file-list"></ul>
-
-        <div class="or"><span>or paste a link</span></div>
-        <label class="field link-field">
-          <span class="sr-only">Link to a song</span>
-          <input id="link-input" type="url" inputmode="url" autocomplete="off" spellcheck="false"
-            placeholder="YouTube, SoundCloud, Spotify, Bandcamp… or a direct link to an audio file">
-          <small class="muted">Spotify tracks can't be downloaded, so the same song is found on YouTube instead.</small>
-        </label>
+        <div id="source-picker"></div>
 
         <div class="options">
           <label class="field">
@@ -179,6 +165,7 @@
     </form>
   </dialog>
 
+  <script src="/static/common.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

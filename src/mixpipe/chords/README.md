@@ -14,6 +14,9 @@ get an editable chord sheet:
 Works with a full song (vocals + instruments), a single instrumental track,
 several stems uploaded together, or a link.
 
+To mute the vocals or the guitar and play along instead, see the
+[stem splitter](../splitter/README.md), a separate app with the same install.
+
 All commands below are run from the **repository root** (the folder with
 `Makefile` in it).
 

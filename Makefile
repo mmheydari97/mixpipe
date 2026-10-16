@@ -1,4 +1,4 @@
-.PHONY: install install-chords stems analyze mix mix-llm chords chords-ui test clean
+.PHONY: install install-chords stems analyze mix mix-llm chords chords-ui split split-ui test clean
 
 install:
 	pip install -r requirements.txt
@@ -24,6 +24,12 @@ chords:
 
 chords-ui:
 	PYTHONPATH=src python -m mixpipe.cli chords-ui
+
+split:
+	PYTHONPATH=src python -m mixpipe.cli split "$(FILE)"
+
+split-ui:
+	PYTHONPATH=src python -m mixpipe.cli split-ui
 
 test:
 	PYTHONPATH=src python -m pytest tests/ -q

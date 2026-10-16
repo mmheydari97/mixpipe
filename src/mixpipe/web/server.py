@@ -8,31 +8,25 @@ share well); the page polls /status while a job runs.
 
 from __future__ import annotations
 
-import json
-import re
-import shutil
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from ..chords import fetch, pipeline
+from ..chords import pipeline
 from ..chords.align import lines_to_text, reanchor, word_diff
 from ..chords.sheet import (apply_settings, custom_from_display, load_sheet, save_sheet,
                             to_chordpro, to_text, view)
+from .common import SongService, add_page, add_song_routes, as_bool
 
-STATIC = Path(__file__).parent / "static"
 # Python's mimetypes guesses e.g. audio/mp4a-latm for .m4a, which Safari won't play
 AUDIO_TYPES = {
     ".m4a": "audio/mp4", ".mp4": "audio/mp4", ".aac": "audio/aac", ".mp3": "audio/mpeg",
     ".wav": "audio/wav", ".flac": "audio/flac", ".ogg": "audio/ogg", ".opus": "audio/ogg",
     ".webm": "audio/webm",
 }
-_ID = re.compile(r"^[\w-]+$", re.UNICODE)
 
 POLISH_PROMPT = """\
 You correct speech-recognition errors in song lyrics. The user message is a \
@@ -44,13 +38,16 @@ the same order. Do not add, remove, merge or translate lines. Do not add titles,
 section labels, notes or commentary. Return only the corrected lyrics."""
 
 
-class LinkIn(BaseModel):
-    url: str
-    language: str = "auto"
-    stt: str = "mlx"
-    stt_model: str | None = None
-    separate: bool = True
-    rerun: bool = False
+def parse_options(fields: dict) -> dict:
+    """The analysis options sent with an upload or a link."""
+    stt = fields.get("stt") or "mlx"
+    stt_model = fields.get("stt_model") or None
+    if stt not in ("mlx", "openrouter"):
+        raise HTTPException(400, "stt must be mlx or openrouter")
+    if stt == "openrouter" and not stt_model:
+        raise HTTPException(400, "pick an OpenRouter transcription model")
+    return {"language": str(fields.get("language") or "auto"), "stt": stt,
+            "stt_model": stt_model, "separate": as_bool(fields.get("separate"), True)}
 
 
 class LyricsIn(BaseModel):
@@ -87,100 +84,21 @@ def create_app(
     injectable for tests, and `run_inline` runs analysis synchronously instead
     of in the worker thread."""
     root = Path(root)
-    root.mkdir(parents=True, exist_ok=True)
     app = FastAPI(title="mixpipe chords")
-    worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="chords")
     sheet_lock = threading.Lock()
 
-    def song_dir(song_id: str) -> Path:
-        if not _ID.match(song_id):
-            raise HTTPException(400, "bad song id")
-        d = root / song_id
-        if not (d / "meta.json").exists():
-            raise HTTPException(404, "no such song")
-        return d
+    def job(d: Path, options: dict):
+        return pipeline.run_job(d, options, separator=separator, transcriber=transcriber,
+                                root=root, downloader=downloader)
 
-    def sheet_path(song_id: str) -> Path:
-        p = song_dir(song_id) / "sheet.json"
-        if not p.exists():
-            raise HTTPException(409, "song is not analysed yet")
-        return p
-
-    def submit(d: Path, options: dict) -> None:
-        kwargs = {"separator": separator, "transcriber": transcriber, "root": root,
-                  "downloader": downloader}
-        if run_inline:
-            pipeline.run_job(d, options, **kwargs)
-        else:
-            worker.submit(pipeline.run_job, d, options, **kwargs)
-
-    # ---- songs ---------------------------------------------------------------
-
-    @app.get("/api/songs")
-    def songs():
-        return pipeline.list_songs(root)
-
-    def check_stt(stt: str, stt_model: str | None) -> None:
-        if stt not in ("mlx", "openrouter"):
-            raise HTTPException(400, "stt must be mlx or openrouter")
-        if stt == "openrouter" and not stt_model:
-            raise HTTPException(400, "pick an OpenRouter transcription model")
-
-    def start(song_id: str, options: dict, rerun: bool) -> dict:
-        d = root / song_id
-        if (d / "sheet.json").exists() and not rerun:
-            # same song added again: keep the existing (possibly edited) sheet
-            pipeline.set_status(d, "done", "align", 1.0, "already analysed")
-        else:
-            needs_download = not json.loads((d / "meta.json").read_text())["inputs"]
-            pipeline.set_status(d, "queued", "download" if needs_download else "decode",
-                                0.0, "waiting")
-            submit(d, options)
-        return {"id": song_id}
-
-    @app.post("/api/songs")
-    async def upload(
-        files: list[UploadFile] = File(...),
-        language: str = Form("auto"),
-        stt: str = Form("mlx"),
-        stt_model: str | None = Form(None),
-        separate: bool = Form(True),
-        rerun: bool = Form(False),
-    ):
-        check_stt(stt, stt_model)
-        data = [(f.filename or "audio", await f.read()) for f in files]
-        try:
-            song_id = pipeline.new_song(data, root)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        return start(song_id, {"language": language, "stt": stt, "stt_model": stt_model,
-                               "separate": separate}, rerun)
-
-    @app.post("/api/songs/link")
-    def from_link(body: LinkIn):
-        # plain def: FastAPI runs it in a thread, so the lookup doesn't block the loop
-        check_stt(body.stt, body.stt_model)
-        try:
-            source = (resolver or fetch.resolve)(body.url)
-        except fetch.FetchError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        song_id = pipeline.new_song_from_url(source, root)
-        return start(song_id, {"language": body.language, "stt": body.stt,
-                               "stt_model": body.stt_model, "separate": body.separate},
-                     body.rerun)
-
-    @app.get("/api/songs/{song_id}/status")
-    def status(song_id: str):
-        return pipeline.get_status(song_dir(song_id))
+    svc = SongService(root, job, done_file="sheet.json", done_stage="align",
+                      run_inline=run_inline, name="chords")
+    song_dir, sheet_path = svc.song_dir, svc.result_path
+    add_song_routes(app, svc, parse_options, resolver=resolver)
 
     @app.get("/api/songs/{song_id}")
     def get_song(song_id: str):
         return view(load_sheet(sheet_path(song_id)))
-
-    @app.delete("/api/songs/{song_id}")
-    def delete_song(song_id: str):
-        shutil.rmtree(song_dir(song_id))
-        return {"ok": True}
 
     @app.put("/api/songs/{song_id}/lyrics")
     def put_lyrics(song_id: str, body: LyricsIn):
@@ -286,11 +204,5 @@ def create_app(
             models = [{**m, "word_timing": caps.get(m["id"])} for m in models]
         return models
 
-    # ---- page ------------------------------------------------------------------
-
-    @app.get("/")
-    def index():
-        return FileResponse(STATIC / "index.html")
-
-    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+    add_page(app, "index.html")
     return app

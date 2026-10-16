@@ -6,6 +6,8 @@
     python -m mixpipe.cli chords  song.mp3 [--lang fa] [--stt openrouter --stt-model ID]
     python -m mixpipe.cli chords  https://youtu.be/...   (YouTube, SoundCloud, Spotify, ...)
     python -m mixpipe.cli chords-ui [--port 8765]
+    python -m mixpipe.cli split   song.mp3 | https://...   (vocals / guitar / ... stems)
+    python -m mixpipe.cli split-ui  [--port 8766]
 """
 
 from __future__ import annotations
@@ -101,6 +103,57 @@ def cmd_mix(args) -> int:
 
 
 CHORDS_DEPS_HINT = "the chord finder needs extra packages: pip install -r requirements-chords.txt"
+SPLIT_DEPS_HINT = "the splitter needs extra packages: pip install -r requirements-chords.txt"
+
+
+def _add_song(paths: list[str], root: Path, title: str | None, quiet: bool,
+              many: bool = True) -> str:
+    """Store a song from audio files or one link (songstore); returns its id."""
+    from . import songstore
+
+    links = [f for f in paths if re.match(r"^https?://", f)]
+    if links:
+        from .fetch import FetchError, resolve
+
+        if len(paths) > 1:
+            raise ValueError("give either one link or audio files, not both")
+        try:
+            source = resolve(links[0])
+        except FetchError as exc:
+            raise ValueError(f"{links[0]}: {exc}") from exc
+        if source.get("note") and not quiet:
+            print(source["note"])
+        return songstore.new_song_from_url(source, root, title=title)
+    if not many and len(paths) > 1:
+        raise ValueError("give one file: the full song")
+    files = []
+    for f in paths:
+        p = Path(f)
+        if not p.is_file():
+            raise FileNotFoundError(f"no such file: {p}")
+        files.append((p.name, p.read_bytes()))
+    return songstore.new_song(files, root, title=title)
+
+
+def _progress_printer(quiet: bool):
+    def progress(stage: str, frac: float, msg: str) -> None:
+        if not quiet and frac in (0.0, 0.1, 1.0):
+            print(f"[{stage:<10}] {msg}")
+    return progress
+
+
+def _serve(app, name: str, host: str, port: int, no_browser: bool) -> int:
+    import uvicorn
+
+    url = f"http://{host}:{port}/"
+    print(f"mixpipe {name} on {url}  (Ctrl+C to stop)")
+    if not no_browser:
+        import threading
+        import webbrowser
+
+        threading.Timer(1.0, webbrowser.open, [url]).start()
+    uvicorn.run(app, host=host, port=port, log_level="warning")
+    return 0
 
 
 def cmd_chords(args) -> int:
@@ -111,38 +164,13 @@ def cmd_chords(args) -> int:
         raise RuntimeError(f"{CHORDS_DEPS_HINT} ({exc})") from exc
 
     root = Path(args.out)
-    links = [f for f in args.files if re.match(r"^https?://", f)]
-    if links:
-        from .chords.fetch import FetchError, resolve
-
-        if len(args.files) > 1:
-            raise ValueError("give either one link or audio files, not both")
-        try:
-            source = resolve(links[0])
-        except FetchError as exc:
-            raise ValueError(f"{links[0]}: {exc}") from exc
-        if source.get("note") and not args.quiet:
-            print(source["note"])
-        song_id = pipeline.new_song_from_url(source, root, title=args.title)
-    else:
-        files = []
-        for f in args.files:
-            p = Path(f)
-            if not p.is_file():
-                raise FileNotFoundError(f"no such file: {p}")
-            files.append((p.name, p.read_bytes()))
-        song_id = pipeline.new_song(files, root, title=args.title)
+    song_id = _add_song(args.files, root, args.title, args.quiet)
     song_dir = root / song_id
-
-    def progress(stage: str, frac: float, msg: str) -> None:
-        if not args.quiet and frac in (0.0, 0.1, 1.0):
-            print(f"[{stage:<10}] {msg}")
-
     sheet = pipeline.analyze(
         song_dir,
         {"language": args.lang, "stt": args.stt, "stt_model": args.stt_model,
          "separate": not args.no_separate},
-        progress=progress,
+        progress=_progress_printer(args.quiet),
     )
     pipeline.set_status(song_dir, "done", "align", 1.0, "done")
     (song_dir / f"{song_id}.cho").write_text(to_chordpro(sheet))
@@ -157,21 +185,38 @@ def cmd_chords(args) -> int:
 
 def cmd_chords_ui(args) -> int:
     try:
-        import uvicorn
-
         from .web.server import create_app
     except ImportError as exc:
         raise RuntimeError(f"{CHORDS_DEPS_HINT} ({exc})") from exc
+    return _serve(create_app(args.out), "chords UI", args.host, args.port, args.no_browser)
 
-    url = f"http://{args.host}:{args.port}/"
-    print(f"mixpipe chords UI on {url}  (Ctrl+C to stop)")
-    if not args.no_browser:
-        import threading
-        import webbrowser
 
-        threading.Timer(1.0, webbrowser.open, [url]).start()
-    uvicorn.run(create_app(args.out), host=args.host, port=args.port, log_level="warning")
+def cmd_split(args) -> int:
+    try:
+        from . import songstore
+        from .splitter import pipeline
+    except ImportError as exc:
+        raise RuntimeError(f"{SPLIT_DEPS_HINT} ({exc})") from exc
+
+    root = Path(args.out)
+    song_id = _add_song([args.file], root, args.title, args.quiet, many=False)
+    song_dir = root / song_id
+    pipeline.split(song_dir, progress=_progress_printer(args.quiet))
+    songstore.set_status(song_dir, "done", "separate", 1.0, "done")
+    if not args.quiet:
+        print()
+        for name in pipeline.STEM_NAMES:
+            print(pipeline.stem_path(song_dir, name))
+        print("mix them in the browser with: python -m mixpipe.cli split-ui")
     return 0
+
+
+def cmd_split_ui(args) -> int:
+    try:
+        from .web.splitter_server import create_app
+    except ImportError as exc:
+        raise RuntimeError(f"{SPLIT_DEPS_HINT} ({exc})") from exc
+    return _serve(create_app(args.out), "splitter", args.host, args.port, args.no_browser)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -231,6 +276,21 @@ def main(argv: list[str] | None = None) -> int:
     p_ui.add_argument("--out", default="out/chords", help="song store directory")
     p_ui.add_argument("--no-browser", action="store_true")
     p_ui.set_defaults(func=cmd_chords_ui)
+
+    p_sp = sub.add_parser("split", help="split a song into vocals / guitar / drums / bass / "
+                                        "keys / other (headless)")
+    p_sp.add_argument("file", help="the full song, or a link (YouTube, SoundCloud, Spotify, ...)")
+    p_sp.add_argument("--title", default=None)
+    p_sp.add_argument("--out", default="out/splitter", help="song store directory")
+    p_sp.add_argument("--quiet", action="store_true")
+    p_sp.set_defaults(func=cmd_split)
+
+    p_su = sub.add_parser("split-ui", help="start the stem splitter / practice mixer web UI")
+    p_su.add_argument("--host", default="127.0.0.1")
+    p_su.add_argument("--port", type=int, default=8766)
+    p_su.add_argument("--out", default="out/splitter", help="song store directory")
+    p_su.add_argument("--no-browser", action="store_true")
+    p_su.set_defaults(func=cmd_split_ui)
 
     args = parser.parse_args(argv)
     try:

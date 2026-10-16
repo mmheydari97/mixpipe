@@ -131,14 +131,34 @@ pitch); the UI suggests a capo when one would put clearly more of the song on
 open guitar shapes.
 Songs are stored in `out/chords/<song>/`.
 
+## Stem splitter
+
+The reverse of the mix pipeline: give it one song (a file or a link) and it
+splits it into vocals, guitar, drums, bass, keys and other (Demucs
+`htdemucs_6s`). A practice mixer in the browser has a volume / mute / solo
+control per channel, slow-down without changing the key, an A–B loop, and
+"download this mix" (e.g. the song without guitar) as MP3 or WAV.
+
+```bash
+PYTHONPATH=src python -m mixpipe.cli split-ui                 # web UI on http://127.0.0.1:8766
+PYTHONPATH=src python -m mixpipe.cli split song.m4a           # headless: six stereo FLAC stems
+PYTHONPATH=src python -m mixpipe.cli split "https://youtu.be/..."
+```
+
+Same install as the chord finder. It's a separate app (own port, own
+`out/splitter/` folder), sharing song storage (`songstore.py`), link downloads
+(`fetch.py`) and the web plumbing (`web/common.py`, `static/common.*`) with it.
+Full guide: [`src/mixpipe/splitter/README.md`](src/mixpipe/splitter/README.md).
+
 ## Status
 
 Implemented: IO, analysis, DC/noise cleanup, gate, biquad EQ chain, compressor,
 pan, mixdown, master chain (EQ, glue comp, true-ish peak limiter, loudness
 normalization), rule-based advisor, LLM advisor, CLI.
 
-Also implemented: chord finder (`mixpipe.chords`, `mixpipe.web`), Demucs
-separation (`separation.py`), key detection (`pitch.detect_key`).
+Also implemented: chord finder (`mixpipe.chords`, `mixpipe.web`), stem
+splitter / practice mixer (`mixpipe.splitter`, `web/splitter_server.py`),
+Demucs separation (`separation.py`), key detection (`pitch.detect_key`).
 
 Stubbed with `# TODO` (raise/pass, safe to run past):
 - `pitch.py` — pitch correction. Needs a real pitch tracker + PSOLA/WORLD.

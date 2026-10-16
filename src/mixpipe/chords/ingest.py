@@ -9,21 +9,13 @@ Roles come from filenames via io_utils.infer_role (vox.wav, bass.wav, ...).
 
 from __future__ import annotations
 
-import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
-from ..io_utils import infer_role, normalize_shape, read_audio, to_sample_rate
-
-WORK_SR = 44_100  # Demucs' native rate; everything is brought here first
-
-UPLOAD_EXTS = {
-    ".wav", ".wave", ".flac", ".aiff", ".aif", ".ogg", ".mp3", ".m4a", ".aac",
-    ".mp4", ".opus", ".webm", ".wma",
-}
+from ..io_utils import (UPLOAD_EXTS, WORK_SR, decode, infer_role,  # noqa: F401
+                        normalize_shape, to_sample_rate)
 
 
 @dataclass
@@ -35,30 +27,6 @@ class Ingested:
     vocal: np.ndarray | None = None    # mono (stems mode)
     bass: np.ndarray | None = None     # mono (stems mode)
     roles: dict[str, str] | None = None
-
-
-def decode(path: str | Path) -> tuple[np.ndarray, int]:
-    """Read any audio file: soundfile first, ffmpeg for everything else (m4a...)."""
-    path = Path(path)
-    try:
-        return read_audio(path)
-    except Exception:  # noqa: BLE001 - fall through to ffmpeg
-        pass
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError(
-            f"{path.name}: can't decode this format without ffmpeg (brew install ffmpeg)"
-        )
-    proc = subprocess.run(
-        [ffmpeg, "-v", "error", "-i", str(path), "-f", "f32le", "-ac", "2",
-         "-ar", str(WORK_SR), "-"],
-        capture_output=True, check=False,
-    )
-    if proc.returncode != 0 or not proc.stdout:
-        raise RuntimeError(f"{path.name}: ffmpeg could not decode it: "
-                           f"{proc.stderr.decode(errors='replace')[:200]}")
-    audio = np.frombuffer(proc.stdout, dtype="<f4").reshape(-1, 2)
-    return audio.copy(), WORK_SR
 
 
 def _stereo(audio: np.ndarray) -> np.ndarray:
