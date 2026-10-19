@@ -10,6 +10,9 @@ get an editable chord sheet:
   the song changes key, the change is marked on the chord where it happens
 - transpose, capo (with a suggestion for open guitar shapes), bar lines, and
   export to ChordPro or plain text
+- a **Harmonica** tab: the sung melody as tab for a 12-hole C chromatic
+  harmonica (Chromonica 48 / 270), with hole, blow or draw, and button for every
+  note, each editable like the chords
 
 Works with a full song (vocals + instruments), a single instrumental track,
 several stems uploaded together, or a link.
@@ -108,7 +111,7 @@ Your browser opens **http://127.0.0.1:8765**. Stop the server with `Ctrl+C`.
    (see [section 5](#5-optional-openrouter)).
 4. Keep **Separate vocals and drums first** ticked for full songs.
 5. Press **Analyze** and watch the stages: (Download →) Decode → Separate →
-   Lyrics → Chords → Align. Time grows with song length; a 40-second test song took
+   Lyrics → Chords → Melody → Align. Time grows with song length; a 40-second test song took
    about 25 s on an M4 Pro (after the first-run downloads).
 
 **On the chord sheet:**
@@ -137,6 +140,45 @@ Your browser opens **http://127.0.0.1:8765**. Stop the server with `Ctrl+C`.
 
 Everything you change is saved immediately.
 
+### Harmonica tab
+
+Switch with the **Guitar chords | Harmonica** tabs above the sheet (the link
+`#/song/<id>/harmonica` opens it directly). It's written for a **12-hole C
+chromatic harmonica in solo tuning**, which plays C4 to C♯7:
+
+```
+hole   1  2  3  4 | 5  6  7  8 | 9 10 11 12
+blow   C  E  G  C | C  E  G  C | C  E  G  C
+draw   D  F  A  B | D  F  A  B | D  F  A  B      button in = one semitone up
+```
+
+- Each note shows its name over its tab: **`3↑`** = hole 3 blow, **`3↓`** = hole
+  3 draw, **`●`** = button pressed in (`3↓●` = B♭).
+- Notes sit over the lyric words like chords do. A held word can carry several
+  notes, and the gaps between lines become rows of notes in bars.
+- **Click a note** to open its menu:
+  - the three candidates, each with its tab, confidence and **▶ hear** (plays
+    that bit of the song with the note on top)
+  - **Play as**, for notes with more than one fingering (F = `2↓` or `2↑●`,
+    C5 = `4↑`, `5↑` or `4↓●`). By default the tab uses no button when it can,
+    then the hole nearest the previous note
+  - a box for typing any note: `F#`, `Bb`, `C5`. Without an octave, the nearest
+    one is used
+  - **✕ Not a note** for anything that isn't really part of the melody
+    (restore it from the same menu)
+- **Octave − / +**: the melody is moved by whole octaves so as many notes as
+  possible fit the harmonica (picked automatically from the sung notes).
+  Change it if you'd rather play higher or lower; *automatic* goes back.
+  Notes that still don't fit get a red dashed border and `—`. **Transpose**
+  applies here too; capo doesn't.
+- Where nobody sings, the notes are a rough guess from the instruments, shown
+  faded. Expect to fix those, or remove them.
+- **Find melody** appears for songs analysed before the harmonica tab existed.
+  It takes a few seconds per minute of audio and keeps your chord and lyric
+  edits. **Re-detect melody** (click twice) finds the notes again and replaces
+  your edits on this tab.
+- **Harmonica tab** downloads a plain-text version (`<song-id>.harp.txt`).
+
 ## 4. Headless (no browser)
 
 ```bash
@@ -160,9 +202,9 @@ PYTHONPATH=src python -m mixpipe.cli chords "https://open.spotify.com/track/..."
 | `--out` | `out/chords` | song store directory |
 | `--quiet` | off | no progress output |
 
-It prints the chord sheet and writes `sheet.json`, `<song-id>.cho` and
-`<song-id>.txt` into the song's folder. Songs analysed this way also show up
-in the web UI.
+It prints the chord sheet and writes `sheet.json`, `<song-id>.cho`,
+`<song-id>.txt` and the harmonica tab `<song-id>.harp.txt` into the song's
+folder. Songs analysed this way also show up in the web UI.
 
 ## 5. Optional: OpenRouter
 
@@ -191,6 +233,7 @@ out/chords/<song-id>/
   separated/        vocals / bass / other / drums from Demucs
   transcript.json   cached lyrics
   chords.json       cached chord analysis
+  melody.json       cached melody notes (harmonica tab)
   sheet.json        the sheet with all your edits
   status.json       progress of the last analysis
 ```
@@ -229,5 +272,5 @@ PYTHONPATH=src python -m pytest tests/test_chords.py -q
 No models are downloaded and no network is needed: separation and
 transcription are faked in the tests.
 
-Known limitations (accuracy, meter, key changes) are listed in
+Known limitations (accuracy, meter, key changes, melody) are listed in
 [`TODO.md`](../../../TODO.md#chord-finder).

@@ -79,3 +79,10 @@ result, so the pipeline runs end to end today. Grep for `# TODO` to find them.
 - **Capo suggestions are guitar-only** and use a fixed list of open shapes
   (F and Bm count half). No ukulele / alternate tunings.
 - **One job at a time.** The worker is a single thread; fine for a personal tool.
+- **Harmonica melody** is pYIN on the Demucs vocal stem. Breathy, harmonised or
+  heavily processed vocals give wrong or jittery notes, fast runs and grace notes
+  under 0.1 s are dropped, and an octave error is only fixed when the neighbouring
+  notes make it obvious. Where nobody sings, the notes are a rough single-pitch
+  guess on the polyphonic instrument stem (shown faded). Notes can't be merged,
+  split or added yet: only re-picked, retyped or removed. Only the 12-hole C
+  chromatic in solo tuning is modelled.

@@ -89,7 +89,12 @@
           <span class="spacer"></span>
           <a id="export-cho" class="button" download>ChordPro</a>
           <a id="export-txt" class="button" download>Text</a>
+          <a id="export-harp" class="button" download hidden>Harmonica tab</a>
         </div>
+        <nav class="tabs" role="tablist" aria-label="Instrument">
+          <a id="tab-guitar" role="tab" aria-selected="true">Guitar chords</a>
+          <a id="tab-harmonica" role="tab" aria-selected="false">Harmonica <em>C chromonica</em></a>
+        </nav>
       </div>
 
       <div class="arrange" id="arrange">
@@ -99,10 +104,18 @@
           <output id="tr-val">0</output>
           <button id="tr-up" aria-label="Transpose up a semitone">+</button>
         </div>
-        <div class="group">
+        <div class="group" id="capo-group">
           <label class="lbl" for="capo">Capo</label>
           <select id="capo"></select>
           <button id="capo-suggest" class="link" hidden></button>
+        </div>
+        <div class="group" id="octave-group" hidden
+             title="Moves the whole melody by octaves. Automatic picks the octave that fits the most notes on the harmonica.">
+          <span class="lbl">Octave</span>
+          <button id="oct-down" aria-label="Melody an octave lower">−</button>
+          <output id="oct-val">0</output>
+          <button id="oct-up" aria-label="Melody an octave higher">+</button>
+          <button id="oct-auto" class="link" hidden>automatic</button>
         </div>
         <div class="group">
           <label class="lbl" for="meter">Time</label>
@@ -135,6 +148,17 @@
       </div>
 
       <div id="sheet" class="sheet"></div>
+
+      <div id="harp-panel" hidden>
+        <div class="harp-head">
+          <span class="legend" aria-label="Legend"><b>3↑</b> blow · <b>3↓</b> draw · <b>●</b> button in</span>
+          <span id="harp-meta" class="meta"></span>
+          <span class="spacer"></span>
+          <button id="melody-btn">Find melody</button>
+        </div>
+        <div id="melody-progress"></div>
+        <div id="harp-sheet" class="sheet harp"></div>
+      </div>
     </section>
   </main>
 
@@ -167,5 +191,6 @@
 
   <script src="/static/common.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/harmonica.js"></script>
 </body>
 </html>

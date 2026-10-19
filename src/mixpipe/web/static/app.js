@@ -233,8 +233,9 @@ function createModelPicker(container, kind, { placeholder, initialQuery = "", on
 // =========================================================================
 
 const { stageLabel, pollStatus } = createJobUI(
-  ["decode", "separate", "transcribe", "chords", "align"],
-  { decode: "Decode", separate: "Separate", transcribe: "Lyrics", chords: "Chords", align: "Align" });
+  ["decode", "separate", "transcribe", "chords", "melody", "align"],
+  { decode: "Decode", separate: "Separate", transcribe: "Lyrics", chords: "Chords", melody: "Melody",
+    align: "Align" });
 
 // =========================================================================
 // library view
@@ -332,6 +333,7 @@ function initLibrary() {
 
 const S = {
   song: null,
+  tab: "guitar",       // "guitar" | "harmonica" (harmonica.js)
   chords: new Map(),   // id -> chord
   timeline: [],        // visible chords sorted by start
   words: [],           // [{start, end, node}]
@@ -424,6 +426,9 @@ function renderSong() {
   }
   $("#export-cho").href = `/api/songs/${song.id}/export?fmt=cho`;
   $("#export-txt").href = `/api/songs/${song.id}/export?fmt=txt`;
+  $("#export-harp").href = `/api/songs/${song.id}/export?fmt=harp`;
+  $("#tab-guitar").href = `#/song/${song.id}`;
+  $("#tab-harmonica").href = `#/song/${song.id}/harmonica`;
   $("#polish-btn").disabled = !song.lines.length;
 
   renderArrangement();
@@ -470,12 +475,37 @@ function renderSong() {
   if (!rows.length) rows.push(el("p", { class: "muted" }, "No chords detected."));
   sheet.replaceChildren(...rows);
   S.words.sort((a, b) => a.start - b.start);
+  renderHarmonica();
 }
 
-async function openSong(id) {
+function setTab(tab) {
+  S.tab = tab;
+  const guitar = tab === "guitar";
+  $("#tab-guitar").setAttribute("aria-selected", String(guitar));
+  $("#tab-harmonica").setAttribute("aria-selected", String(!guitar));
+  $("#sheet").hidden = !guitar;
+  $("#harp-panel").hidden = guitar;
+  $("#capo-group").hidden = !guitar;
+  $("#octave-group").hidden = guitar || !S.song?.harmonica;
+  $("#export-cho").hidden = $("#export-txt").hidden = !guitar;
+  $("#export-harp").hidden = guitar;
+  closeChordMenu();
+  S.activeChord = S.activeWord = null;
+  document.querySelectorAll(".chip.active, .word.active").forEach((n) => n.classList.remove("active"));
+  resetHarpFollow();
+  tick();
+}
+
+async function openSong(id, tab = "guitar") {
+  if (S.song?.id === id && $("#song-progress").childElementCount === 0) {
+    setTab(tab);  // same song, other tab: nothing to fetch
+    return;
+  }
   closeChordMenu();
   $("#editor").hidden = true;
   $("#sheet").replaceChildren();
+  $("#harp-sheet").replaceChildren();
+  $("#melody-progress").replaceChildren();
   $("#song-progress").replaceChildren();
   $("#song-title").textContent = "";
   $("#song-meta").replaceChildren();
@@ -491,6 +521,7 @@ async function openSong(id) {
     return;
   }
   renderSong();
+  setTab(tab);
   const src = `/api/songs/${id}/audio`;
   if (S.song.audio && audio.dataset.src !== src) {
     audio.src = src;
@@ -516,9 +547,27 @@ function findAt(list, t) {
   return ans;
 }
 
+// highlight the word being sung (and scroll to it when following playback)
+function followWord(words, t, holder) {
+  const wi = findAt(words, t);
+  const w = wi >= 0 && t <= words[wi].end + 0.3 ? words[wi] : null;
+  if (w !== holder.activeWord) {
+    holder.activeWord?.node.classList.remove("active");
+    w?.node.classList.add("active");
+    holder.activeWord = w;
+    if (w && $("#follow").checked && !audio.paused) {
+      const r = w.node.getBoundingClientRect();
+      if (r.top < 80 || r.bottom > window.innerHeight - 140) {
+        w.node.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+    }
+  }
+}
+
 function tick() {
   if (!S.song) return;
   const t = audio.currentTime;
+  if (S.tab === "harmonica") { harpTick(t); return; }
   const ci = findAt(S.timeline, t);
   const cur = ci >= 0 && t < S.timeline[ci].end ? S.timeline[ci] : null;
   if (cur?.id !== S.activeChord) {
@@ -529,20 +578,7 @@ function tick() {
   }
   const next = S.timeline[ci + 1];
   $("#next-chord").textContent = next ? `${displayOf(next)} in ${Math.max(0, next.start - t).toFixed(1)}s` : "–";
-
-  const wi = findAt(S.words, t);
-  const w = wi >= 0 && t <= S.words[wi].end + 0.3 ? S.words[wi] : null;
-  if (w !== S.activeWord) {
-    S.activeWord?.node.classList.remove("active");
-    w?.node.classList.add("active");
-    S.activeWord = w;
-    if (w && $("#follow").checked && !audio.paused) {
-      const r = w.node.getBoundingClientRect();
-      if (r.top < 80 || r.bottom > window.innerHeight - 140) {
-        w.node.scrollIntoView({ block: "center", behavior: "smooth" });
-      }
-    }
-  }
+  followWord(S.words, t, S);
 }
 
 function loop() {
@@ -576,22 +612,40 @@ function stopAudition() {
   if (S.auditionStop) { clearTimeout(S.auditionStop.timer); S.auditionStop = null; audio.pause(); }
 }
 
-function audition(chord, info) {
+// play [start, start + dur) of the song, with `overlay()` starting the synth on top
+function playSection(start, dur, overlay) {
   stopAudition();
-  const dur = Math.min(Math.max(chord.end - chord.start, 1), 10);
   if (S.song.audio) {
-    audio.currentTime = chord.start;
+    audio.currentTime = start;
     audio.play().catch(() => {});
   }
-  if (info) synth.play(info, dur, S.song.beat_period);
+  overlay?.();
   S.auditionStop = { timer: setTimeout(stopAudition, dur * 1000 + 150) };
+}
+
+function audition(chord, info) {
+  const dur = Math.min(Math.max(chord.end - chord.start, 1), 10);
+  playSection(chord.start, dur, info && (() => synth.play(info, dur, S.song.beat_period)));
+}
+
+// show the shared popup menu under `anchor`; `key` identifies what it's for
+function showMenu(rows, anchor, key) {
+  const menu = $("#chord-menu");
+  menu.replaceChildren(...rows);
+  menu.hidden = false;
+  const r = anchor.getBoundingClientRect();
+  const left = Math.min(window.scrollX + r.left, window.scrollX + document.documentElement.clientWidth - menu.offsetWidth - 8);
+  menu.style.left = `${Math.max(8, left)}px`;
+  menu.style.top = `${window.scrollY + r.bottom + 6}px`;
+  anchor.setAttribute("aria-expanded", "true");
+  S.menuFor = key;
+  menu.querySelector(".cand.sel .pick, .pick")?.focus();
 }
 
 function openChordMenu(id, anchor) {
   if (S.menuFor === id && !$("#chord-menu").hidden) { closeChordMenu(); return; }
   closeChordMenu();
   const c = S.chords.get(id);
-  const menu = $("#chord-menu");
   const rows = [el("div", { class: "head" },
     el("span", {}, `${fmtTime(c.start)} – ${fmtTime(c.end)}`),
     el("span", {}, `${c.beats} beat${c.beats === 1 ? "" : "s"}`))];
@@ -621,15 +675,7 @@ function openChordMenu(id, anchor) {
     el("button", { onclick: () => audition(c, chordInfoOf(c)) }, "▶ With current"),
     el("button", { onclick: stopAudition }, "■ Stop")));
 
-  menu.replaceChildren(...rows);
-  menu.hidden = false;
-  const r = anchor.getBoundingClientRect();
-  const left = Math.min(window.scrollX + r.left, window.scrollX + document.documentElement.clientWidth - menu.offsetWidth - 8);
-  menu.style.left = `${Math.max(8, left)}px`;
-  menu.style.top = `${window.scrollY + r.bottom + 6}px`;
-  anchor.setAttribute("aria-expanded", "true");
-  S.menuFor = id;
-  menu.querySelector(".cand.sel .pick, .pick")?.focus();
+  showMenu(rows, anchor, id);
 }
 
 document.addEventListener("click", (e) => {
@@ -706,7 +752,7 @@ function initArrangement() {
   if (bars != null) $("#show-bars").checked = bars === "1";
   $("#show-bars").addEventListener("change", (e) => {
     store.set("mixpipe.showBars", e.target.checked ? "1" : "0");
-    $("#sheet").classList.toggle("show-bars", e.target.checked);
+    document.querySelectorAll(".sheet").forEach((n) => n.classList.toggle("show-bars", e.target.checked));
   });
 }
 
@@ -788,12 +834,12 @@ function alertInline(container, msg) {
 // =========================================================================
 
 function route() {
-  const m = /^#\/song\/([^/?#]+)/.exec(location.hash);
+  const m = /^#\/song\/([^/?#]+)(\/harmonica)?/.exec(location.hash);
   stopAudition();
   if (m) {
     $("#library-view").hidden = true;
     $("#song-view").hidden = false;
-    openSong(decodeURIComponent(m[1]));
+    openSong(decodeURIComponent(m[1]), m[2] ? "harmonica" : "guitar");
   } else {
     $("#song-view").hidden = true;
     $("#library-view").hidden = false;

@@ -159,6 +159,7 @@ def _serve(app, name: str, host: str, port: int, no_browser: bool) -> int:
 def cmd_chords(args) -> int:
     try:
         from .chords import pipeline
+        from .chords.harmonica import to_harp_text
         from .chords.sheet import to_chordpro, to_text
     except ImportError as exc:
         raise RuntimeError(f"{CHORDS_DEPS_HINT} ({exc})") from exc
@@ -175,10 +176,11 @@ def cmd_chords(args) -> int:
     pipeline.set_status(song_dir, "done", "align", 1.0, "done")
     (song_dir / f"{song_id}.cho").write_text(to_chordpro(sheet))
     (song_dir / f"{song_id}.txt").write_text(to_text(sheet))
+    (song_dir / f"{song_id}.harp.txt").write_text(to_harp_text(sheet))
     if not args.quiet:
         print()
         print(to_text(sheet))
-        print(f"wrote {song_dir}/sheet.json, {song_id}.cho, {song_id}.txt")
+        print(f"wrote {song_dir}/sheet.json, {song_id}.cho, {song_id}.txt, {song_id}.harp.txt")
         print("open it in the editor with: python -m mixpipe.cli chords-ui")
     return 0
 

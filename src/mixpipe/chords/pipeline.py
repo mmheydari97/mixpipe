@@ -1,5 +1,5 @@
 """Song store and the analysis pipeline: (download ->) decode -> separate ->
-transcribe -> chords -> align.
+transcribe -> chords -> melody -> align.
 
 Each song lives in out/chords/<song_id>/ (folder layout and ids: songstore.py):
 
@@ -9,6 +9,7 @@ Each song lives in out/chords/<song_id>/ (folder layout and ids: songstore.py):
   separated/       Demucs stems (mono FLAC), cached
   transcript.json  cached, keyed by backend/model/language
   chords.json      cached, keyed by RECOGNIZER_VERSION
+  melody.json      cached melody notes for the harmonica tab, keyed by MELODY_VERSION
   sheet.json       the editable result (see sheet.py)
   status.json      job state, for the UI to poll
 
@@ -32,7 +33,8 @@ from .sheet import SHEET_VERSION, load_sheet, save_sheet
 
 DEFAULT_ROOT = Path("out/chords")
 RECOGNIZER_VERSION = 4
-STAGES = ("download", "decode", "separate", "transcribe", "chords", "align")
+MELODY_VERSION = 1
+STAGES = ("download", "decode", "separate", "transcribe", "chords", "melody", "align")
 BROWSER_PLAYABLE = {".mp3", ".m4a", ".aac", ".mp4", ".wav", ".flac", ".ogg", ".opus", ".webm"}
 
 DEFAULT_OPTIONS = {
@@ -107,13 +109,15 @@ def analyze(
     transcriber: Callable | None = None,
     root: Path | None = None,
     downloader: Callable | None = None,
+    melody_extractor: Callable | None = None,
 ) -> dict:
     """Run every stage for one song and write sheet.json. Returns the sheet.
 
     `separator(audio, sr, progress=cb) -> list[Stem]`,
-    `transcriber(vocal, sr, backend=, model=, language=) -> transcript` and
-    `downloader(source, dest_dir, progress=cb) -> Path` can be injected (tests
-    use fakes so no models or songs are downloaded).
+    `transcriber(vocal, sr, backend=, model=, language=) -> transcript`,
+    `downloader(source, dest_dir, progress=cb) -> Path` and
+    `melody_extractor(vocal, sr, regions, fallback=, key=, progress=) -> {"notes"}`
+    can be injected (tests use fakes so no models or songs are downloaded).
     """
     from .recognize import recognize
     from .transcribe import has_vocals, transcribe, vocal_activity
@@ -135,31 +139,7 @@ def analyze(
     report("decode", 1.0, f"{len(ing.mix) / ing.sr:.0f} s of audio")
 
     # ---- separate -------------------------------------------------------------
-    harmony, vocal, bass = ing.harmony, ing.vocal, ing.bass
-    if ing.mode == "mix":
-        mono_mix = ing.mix.mean(axis=1)
-        if opts["separate"]:
-            sep_dir = song_dir / "separated"
-            needed = ("vocals", "bass", "other")
-            if not all((sep_dir / f"{n}.flac").exists() for n in needed):
-                report("separate", 0.0, "separating vocals / bass / other (Demucs)")
-                if separator is None:
-                    from ..separation import separate as separator
-                stems = separator(ing.mix, ing.sr,
-                                  progress=lambda f: report("separate", f, "separating"))
-                for st in stems:
-                    _write_mono(sep_dir / f"{st.name}.flac", st.audio, ing.sr)
-            vocal = _read_mono(sep_dir / "vocals.flac")
-            bass = _read_mono(sep_dir / "bass.flac")
-            harmony = bass + _read_mono(sep_dir / "other.flac")
-            report("separate", 1.0, "separated")
-        else:
-            harmony, vocal, bass = mono_mix, mono_mix, None
-            report("separate", 1.0, "skipped")
-    else:
-        report("separate", 1.0, "using uploaded stems")
-        if harmony is None:
-            raise ValueError("no harmonic stems: every upload looks like vocals or drums")
+    harmony, vocal, bass = _sources(song_dir, ing, opts["separate"], separator, report)
 
     # ---- transcribe -----------------------------------------------------------
     transcript = {"backend": "none", "model": None, "language": None,
@@ -204,6 +184,10 @@ def analyze(
         _write_json(chords_path, chords)
         report("chords", 1.0, f"{len(chords['segments'])} chord changes, key {chords['key_label']}")
 
+    # ---- melody (harmonica tab) -------------------------------------------------
+    melody = find_melody(song_dir, vocal, _lead(harmony, bass), ing.sr, chords["key"],
+                         melody_extractor, report)
+
     # ---- align ----------------------------------------------------------------
     report("align", 0.5, "placing chords on lyrics")
     playback = playback_file(song_dir)
@@ -228,12 +212,73 @@ def analyze(
         "transcript": {k: transcript.get(k) for k in ("backend", "model", "language", "timing")},
         "lines": [{"words": ln, "gap_before": False} for ln in transcript["lines"]],
         "chords": chords["segments"],
+        "melody": {"notes": melody["notes"], "octave": 0},
     }
     if source:
         sheet["source"] = {k: source.get(k) for k in ("url", "page_url", "site", "note")}
     save_sheet(sheet, song_dir / "sheet.json")
     report("align", 1.0, "done")
     return sheet
+
+
+def _sources(song_dir: Path, ing: Ingested, separate: bool, separator, report):
+    """(harmony, vocal, bass) mono signals: Demucs stems of a full mix (cached
+    in separated/), the uploaded stems, or the mix itself when not separating."""
+    if ing.mode != "mix":
+        report("separate", 1.0, "using uploaded stems")
+        if ing.harmony is None:
+            raise ValueError("no harmonic stems: every upload looks like vocals or drums")
+        return ing.harmony, ing.vocal, ing.bass
+    if not separate:
+        mono_mix = ing.mix.mean(axis=1)
+        report("separate", 1.0, "skipped")
+        return mono_mix, mono_mix, None
+    sep_dir = song_dir / "separated"
+    needed = ("vocals", "bass", "other")
+    if not all((sep_dir / f"{n}.flac").exists() for n in needed):
+        report("separate", 0.0, "separating vocals / bass / other (Demucs)")
+        if separator is None:
+            from ..separation import separate as separator
+        stems = separator(ing.mix, ing.sr,
+                          progress=lambda f: report("separate", f, "separating"))
+        for st in stems:
+            _write_mono(sep_dir / f"{st.name}.flac", st.audio, ing.sr)
+    vocal = _read_mono(sep_dir / "vocals.flac")
+    bass = _read_mono(sep_dir / "bass.flac")
+    report("separate", 1.0, "separated")
+    return bass + _read_mono(sep_dir / "other.flac"), vocal, bass
+
+
+def _lead(harmony, bass):
+    """The instruments minus the bass line, where a lead melody is most likely."""
+    if harmony is None or bass is None or len(bass) != len(harmony):
+        return harmony
+    return harmony - bass
+
+
+def find_melody(song_dir: Path, vocal, lead, sr: int, key: str | None,
+                extractor: Callable | None, report, force: bool = False) -> dict:
+    """Melody notes for the harmonica tab, cached in melody.json. `lead` (the
+    instruments) is used where nobody sings."""
+    from .transcribe import has_vocals, vocal_activity
+
+    path = song_dir / "melody.json"
+    cached = json.loads(path.read_text()) if path.exists() and not force else None
+    if cached and cached.get("version") == MELODY_VERSION:
+        report("melody", 1.0, "using cached melody")
+        return cached
+    report("melody", 0.05, "finding the melody")
+    regions = vocal_activity(vocal, sr) if vocal is not None else []
+    if not has_vocals(regions):
+        regions = []
+    if extractor is None:
+        from .melody import extract_melody as extractor
+    melody = extractor(vocal if regions else None, sr, regions, fallback=lead, key=key,
+                       progress=lambda f, msg: report("melody", f, msg))
+    melody["version"] = MELODY_VERSION
+    _write_json(path, melody)
+    report("melody", 1.0, f"{len(melody['notes'])} melody notes")
+    return melody
 
 
 def _write_stereo(path: Path, audio: np.ndarray, sr: int) -> None:
@@ -250,6 +295,34 @@ def run_job(song_dir: Path, options: dict | None = None, **kwargs) -> dict | Non
         done_stage="align")
 
 
-__all__ = ["DEFAULT_ROOT", "STAGES", "analyze", "run_job", "new_song", "new_song_from_url",
-           "list_songs", "get_status", "set_status", "playback_file", "openrouter_caps",
+def run_melody_job(song_dir: Path, lock=None, extractor: Callable | None = None) -> dict | None:
+    """(Re-)find the melody of an analysed song and store it in sheet.json
+    without touching chord or lyric edits. Uses the cached Demucs stems when
+    the song was separated; never re-runs separation. Never raises."""
+    import contextlib
+
+    song_dir = Path(song_dir)
+
+    def work(report):
+        meta = json.loads((song_dir / "meta.json").read_text())
+        report("decode", 0.0, "decoding audio")
+        ing = ingest([song_dir / "inputs" / n for n in meta["inputs"]])
+        report("decode", 1.0, "decoded")
+        separated = (song_dir / "separated" / "vocals.flac").exists()
+        harmony, vocal, bass = _sources(song_dir, ing, separated, None, lambda *a: None)
+        key = load_sheet(song_dir / "sheet.json").get("key")
+        melody = find_melody(song_dir, vocal, _lead(harmony, bass), ing.sr, key, extractor,
+                             report, force=True)
+        with lock or contextlib.nullcontext():
+            sheet = load_sheet(song_dir / "sheet.json")
+            octave = (sheet.get("melody") or {}).get("octave", 0)
+            sheet["melody"] = {"notes": melody["notes"], "octave": octave}
+            save_sheet(sheet, song_dir / "sheet.json")
+        return sheet
+
+    return songstore.run_job(song_dir, work, done_stage="melody")
+
+
+__all__ = ["DEFAULT_ROOT", "STAGES", "analyze", "run_job", "run_melody_job", "new_song",
+           "new_song_from_url", "list_songs", "get_status", "set_status", "playback_file", "openrouter_caps",
            "load_sheet", "save_sheet", "WORK_SR"]

@@ -37,6 +37,43 @@
 .chip.carry::before { content: "("; margin-inline-end: -.3ch; }
 .chip.carry::after { content: ")"; margin-inline-start: -.3ch; }
 
+/* ---------- instrument tabs ---------- */
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 0 0 16px; }
+.tabs a {
+  padding: 8px 14px; color: var(--muted); text-decoration: none; cursor: pointer;
+  border: 1px solid transparent; border-bottom: 0; border-radius: 8px 8px 0 0; margin-bottom: -1px;
+}
+.tabs a:hover { color: var(--text); }
+.tabs a[aria-selected=true] { color: var(--text); font-weight: 600; background: var(--surface); border-color: var(--border); }
+.tabs em { font-style: normal; font-weight: 400; color: var(--muted); font-size: .85em; }
+
+/* ---------- harmonica ---------- */
+.harp-head { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 0 0 12px; }
+.harp-head .spacer { flex: 1; }
+.harp-head .meta { margin: 0; }
+.legend { font-size: .9em; color: var(--muted); }
+.legend b { font-family: var(--mono); color: var(--chord); }
+.chip.note { display: inline-flex; flex-direction: column; align-items: center; line-height: 1.15; padding: 2px 4px; }
+.chip.note .nm { font-weight: 700; }
+.chip.note .tb { font-weight: 500; font-size: .92em; color: var(--text); }
+.chip.note.alt::after, .chip.note.custom::after { content: none; }
+.chip.note.alt .nm::after { content: "•"; margin-left: 1px; color: var(--accent); }
+.chip.note.custom .nm::after { content: "✎"; margin-left: 1px; font-weight: 400; }
+.chip.note.instr { opacity: .6; font-style: italic; }
+.chip.note.oor { border: 1px dashed var(--danger); }
+.chip.note.oor .tb { color: var(--danger); }
+.chip.note.rest { opacity: .4; min-width: 1.6em; }
+.chip.note.active { opacity: 1; }
+.harp .cell .chords { min-height: 2.6em; }
+.chord-menu .fingering-row button.link { font-family: inherit; }
+.chord-menu .pick .tab { margin-left: 10px; font-weight: 500; color: var(--text); }
+.chord-menu .pick .tab.oor { color: var(--danger); font-family: inherit; font-size: .8em; }
+.chord-menu .fingering-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 3px 3px; border-top: 1px solid var(--border); margin-top: 4px; }
+.chord-menu .fingering-row .lbl { font-size: .75em; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-right: 2px; }
+.chord-menu .fingering-row button { padding: 2px 8px; font-family: var(--mono); }
+.chord-menu .fingering-row button.on { background: var(--accent-soft); border-color: var(--chord); color: var(--chord); font-weight: 700; }
+.chord-menu .hint.warn { color: var(--warn); }
+
 /* ---------- arrangement bar ---------- */
 .arrange {
   display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center;

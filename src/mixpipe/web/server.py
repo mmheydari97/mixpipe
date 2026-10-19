@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from ..chords import pipeline
 from ..chords.align import lines_to_text, reanchor, word_diff
+from ..chords.harmonica import note_from_display, set_fingering, to_harp_text
 from ..chords.sheet import (apply_settings, custom_from_display, load_sheet, save_sheet,
                             to_chordpro, to_text, view)
 from .common import SongService, add_page, add_song_routes, as_bool
@@ -59,6 +60,13 @@ class ChordIn(BaseModel):
     custom: str | None = None
 
 
+class NoteIn(BaseModel):
+    selected: int | None = None
+    custom: str | None = None
+    fingering: int | None = None
+    auto_fingering: bool = False
+
+
 class PolishIn(BaseModel):
     model: str
 
@@ -70,6 +78,7 @@ class SettingsIn(BaseModel):
     downbeat: int | None = None
     shift_downbeat: int | None = None
     reset_meter: bool = False
+    harmonica_octave: int | None = None
 
 
 def create_app(
@@ -79,17 +88,19 @@ def create_app(
     run_inline: bool = False,
     resolver=None,
     downloader=None,
+    melody_extractor=None,
 ) -> FastAPI:
-    """Build the app. `separator`/`transcriber`/`resolver`/`downloader` are
-    injectable for tests, and `run_inline` runs analysis synchronously instead
-    of in the worker thread."""
+    """Build the app. `separator`/`transcriber`/`resolver`/`downloader`/
+    `melody_extractor` are injectable for tests, and `run_inline` runs analysis
+    synchronously instead of in the worker thread."""
     root = Path(root)
     app = FastAPI(title="mixpipe chords")
     sheet_lock = threading.Lock()
 
     def job(d: Path, options: dict):
         return pipeline.run_job(d, options, separator=separator, transcriber=transcriber,
-                                root=root, downloader=downloader)
+                                root=root, downloader=downloader,
+                                melody_extractor=melody_extractor)
 
     svc = SongService(root, job, done_file="sheet.json", done_stage="align",
                       run_inline=run_inline, name="chords")
@@ -129,6 +140,48 @@ def create_app(
             save_sheet(sheet, p)
         return chord
 
+    @app.patch("/api/songs/{song_id}/notes/{note_id}")
+    def patch_note(song_id: str, note_id: str, body: NoteIn):
+        """Edit one melody note. `custom` is typed as shown on the harmonica tab
+        ("" reverts, "rest" removes the note); returns the whole view."""
+        p = sheet_path(song_id)
+        with sheet_lock:
+            sheet = load_sheet(p)
+            notes = (sheet.get("melody") or {}).get("notes", [])
+            note = next((n for n in notes if n["id"] == note_id), None)
+            if note is None:
+                raise HTTPException(404, "no such note")
+            try:
+                if body.selected is not None:
+                    if not 0 <= body.selected < len(note["candidates"]):
+                        raise ValueError("selected out of range")
+                    note["selected"] = body.selected
+                    note["custom"] = None
+                    note["fingering"] = None
+                if body.custom is not None:
+                    note["custom"] = note_from_display(body.custom, sheet, note)
+                    note["fingering"] = None
+                if body.auto_fingering:
+                    set_fingering(note, None, sheet)
+                elif body.fingering is not None:
+                    set_fingering(note, body.fingering, sheet)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            save_sheet(sheet, p)
+        return view(sheet)
+
+    @app.post("/api/songs/{song_id}/melody")
+    def find_melody(song_id: str):
+        """Find (or re-find) the melody for the harmonica tab; poll /status."""
+        d = song_dir(song_id)
+        sheet_path(song_id)
+        pipeline.set_status(d, "queued", "decode", 0.0, "waiting")
+        if run_inline:
+            pipeline.run_melody_job(d, lock=sheet_lock, extractor=melody_extractor)
+        else:
+            svc.worker.submit(pipeline.run_melody_job, d, sheet_lock, melody_extractor)
+        return {"id": song_id}
+
     @app.patch("/api/songs/{song_id}/settings")
     def patch_settings(song_id: str, body: SettingsIn):
         p = sheet_path(song_id)
@@ -155,8 +208,10 @@ def create_app(
             body, ext = to_chordpro(sheet), "cho"
         elif fmt == "txt":
             body, ext = to_text(sheet), "txt"
+        elif fmt == "harp":
+            body, ext = to_harp_text(sheet), "harp.txt"
         else:
-            raise HTTPException(400, "fmt must be cho or txt")
+            raise HTTPException(400, "fmt must be cho, txt or harp")
         return PlainTextResponse(body, headers={
             "Content-Disposition": f'attachment; filename="{song_id}.{ext}"'})
 

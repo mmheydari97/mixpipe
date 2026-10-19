@@ -9,7 +9,9 @@ sheet.json is the source of truth for one song:
    "transpose": 0, "capo": 0,
    "transcript": {"backend", "model", "language", "timing"},
    "lines":  [{"words": [{"text", "start", "end", "approx"?}], "gap_before"}],
-   "chords": [{"id", "start", "end", "beats", "candidates", "selected", "custom"}]}
+   "chords": [{"id", "start", "end", "beats", "candidates", "selected", "custom"}],
+   "melody": {"octave": 0, "notes": [{"id", "start", "end", "candidates": [{"label",
+              "midi", "conf"}], "selected", "custom", "fingering", "source"}]}}
 
 "key" is the key the song starts in (what the overview shows). If the song
 modulates, each chord carries its own "key", which drives its spelling, and the
@@ -18,6 +20,9 @@ view marks the chord where the key changes.
 Chord labels are always stored at concert (sounding) pitch. Transpose and capo
 only change what is displayed and exported: shapes = sounding + transpose - capo.
 Rows (chords placed on words, bars) are derived on demand by align.build_rows.
+
+"melody" feeds the harmonica tab (harmonica.py); sheets from before it existed
+have none until the melody is found for them. Notes are stored at sung pitch.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ import os
 from pathlib import Path
 
 from .align import build_rows, chord_label, grid_for
+from .harmonica import MAX_OCTAVE, harmonica_view
 from .theory import (TIME_SIGNATURES, easy_fraction, key_label, key_names, key_short,
                      parse_label, suggest_capo, transpose_label)
 
@@ -127,7 +133,8 @@ def beats_per_bar_for(ts: str, sheet: dict) -> int:
 
 
 def apply_settings(sheet: dict, transpose=None, capo=None, time_signature=None,
-                   downbeat=None, shift_downbeat=None, reset_meter=False) -> dict:
+                   downbeat=None, shift_downbeat=None, reset_meter=False,
+                   harmonica_octave=None) -> dict:
     """Validate and apply display settings in place. Raises ValueError."""
     meter = sheet["meter"]
     if reset_meter and meter.get("detected"):
@@ -156,6 +163,12 @@ def apply_settings(sheet: dict, transpose=None, capo=None, time_signature=None,
         meter["downbeat"] = int(downbeat) % meter["beats_per_bar"]
     if shift_downbeat is not None:
         meter["downbeat"] = (meter["downbeat"] + int(shift_downbeat)) % meter["beats_per_bar"]
+    if harmonica_octave is not None:
+        if not sheet.get("melody"):
+            raise ValueError("this song has no melody yet")
+        if not -MAX_OCTAVE <= int(harmonica_octave) <= MAX_OCTAVE:
+            raise ValueError(f"harmonica_octave must be between -{MAX_OCTAVE} and {MAX_OCTAVE}")
+        sheet["melody"]["octave"] = int(harmonica_octave)
     return sheet
 
 
@@ -203,6 +216,8 @@ def view(sheet: dict) -> dict:
         "easy_shapes": easy_fraction(durations, transpose, int(sheet.get("capo", 0))),
         "capo_suggestion": suggest_capo(durations, transpose, int(sheet.get("capo", 0))),
     }
+    out.pop("melody", None)  # served as "harmonica" instead
+    out["harmonica"] = harmonica_view(sheet)
     return out
 
 
