@@ -45,7 +45,9 @@ source .venv/bin/activate
 uv pip install -r requirements.txt -r requirements-chords.txt
 ```
 
-(`make install-chords` does the same `pip install` inside an activated venv.)
+(`make install-chords` does the same. The `make` targets use `.venv` automatically,
+so they work without activating it; pass extra flags with `ARGS`, e.g.
+`make chords-ui ARGS="--port 8766"`.)
 
 Check it worked:
 

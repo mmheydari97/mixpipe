@@ -136,8 +136,10 @@ Songs are stored in `out/chords/<song>/`.
 The reverse of the mix pipeline: give it one song (a file or a link) and it
 splits it into vocals, guitar, drums, bass, keys and other (Demucs
 `htdemucs_6s`). A practice mixer in the browser has a volume / mute / solo
-control per channel, slow-down without changing the key, an A–B loop, and
-"download this mix" (e.g. the song without guitar) as MP3 or WAV.
+control per channel, 50%–300% speed without changing the key, key changes in
+semitone (one-fret) steps, an A–B loop, and "download this mix" (e.g. the song
+without guitar) as MP3 or WAV. Speed and key changes are made with Rubber Band
+on the server (*Accurate*), or by the browser for speed alone (*Fast*).
 
 ```bash
 PYTHONPATH=src python -m mixpipe.cli split-ui                 # web UI on http://127.0.0.1:8766

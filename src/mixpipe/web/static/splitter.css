@@ -31,6 +31,33 @@ input[type=range] { accent-color: var(--accent); }
 .practice select { min-width: 0; width: auto; padding: 4px 8px; }
 .practice output { font-family: var(--mono); font-size: .9em; color: var(--muted); }
 .keys { margin-top: -6px; }
+.dial input[type=range] { width: 200px; }
+.key-dial input[type=range] { width: 150px; }
+.dial .nudge { padding: 1px 9px; font-weight: 700; min-width: 2.2rem; justify-content: center; }
+.dial output { min-width: 5.5ch; text-align: right; color: var(--text); font-weight: 700; }
+.segmented { display: inline-flex; }
+.segmented button { border-radius: 0; }
+.segmented button:first-child { border-radius: 8px 0 0 8px; }
+.segmented button:last-child { border-radius: 0 8px 8px 0; margin-left: -1px; }
+.segmented button[aria-pressed=true] { background: var(--accent); border-color: var(--accent); color: #fff; }
+#hq-msg.error { color: var(--danger); }
+
+/* key change on its way: the readout shows the new key, dimmed, until it's audible */
+.dial output.pending { color: var(--muted); animation: pulse 1.2s ease-in-out infinite; }
+.key-status { display: inline-flex; align-items: center; gap: 6px; font-size: .85em; color: var(--muted); }
+.key-status.busy { color: var(--text); }
+.key-status.done { color: var(--accent); }
+.key-status.error { color: var(--danger); }
+.spinner {
+  width: 12px; height: 12px; border-radius: 50%; flex: none;
+  border: 2px solid var(--border); border-top-color: var(--accent);
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) {
+  .spinner, .dial output.pending { animation: none; }
+}
 
 /* ---------- transport ---------- */
 .transport {
@@ -61,4 +88,6 @@ input[type=range] { accent-color: var(--accent); }
   .master input { width: 70px; }
   body { padding-bottom: 120px; }
   .practice { gap: 12px; }
+  .dial { width: 100%; }
+  .dial input[type=range], .key-dial input[type=range] { width: auto; flex: 1; min-width: 120px; }
 }

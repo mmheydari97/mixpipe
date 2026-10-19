@@ -14,12 +14,15 @@ from pathlib import Path
 from typing import Callable
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import fetch, songstore
 
 STATIC = Path(__file__).parent / "static"
+# Browsers otherwise cache the page's JS/CSS heuristically and keep running an
+# old script after an update; no-cache makes them revalidate (a cheap 304).
+NO_CACHE = {"Cache-Control": "no-cache"}
 _ID = re.compile(r"^[\w-]+$", re.UNICODE)
 
 
@@ -126,11 +129,25 @@ def add_song_routes(app: FastAPI, svc: SongService,
         return {"ok": True}
 
 
+class _RevalidatedStatic(StaticFiles):
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers.update(NO_CACHE)
+        return response
+
+
 def add_page(app: FastAPI, page: str) -> None:
     """Serve static/<page> at / and the shared static folder at /static."""
 
     @app.get("/")
     def index():
-        return FileResponse(STATIC / page)
+        # /static/x.js -> /static/x.js?v=<mtime>: an edited file gets a new URL,
+        # so even a copy the browser already cached can't be reused by mistake
+        def versioned(m: re.Match) -> str:
+            f = STATIC / m.group(1)
+            return f'/static/{m.group(1)}?v={int(f.stat().st_mtime)}"' if f.is_file() else m.group(0)
 
-    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+        html = re.sub(r'/static/([\w.-]+\.(?:js|css))"', versioned, (STATIC / page).read_text())
+        return HTMLResponse(html, headers=NO_CACHE)
+
+    app.mount("/static", _RevalidatedStatic(directory=STATIC), name="static")

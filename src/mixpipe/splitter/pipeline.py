@@ -5,11 +5,13 @@ Each song lives in out/splitter/<song_id>/ (folder layout and ids: songstore.py)
   meta.json, inputs/, status.json   see songstore
   stems/<name>.flac                 stereo, 16-bit, one per STEMS entry
   stems.json                        names, duration, model: marks the song done
+  versions/                         stems at other speeds/keys (versions.py)
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Callable
 
@@ -78,6 +80,7 @@ def split(song_dir: str | Path, progress: Progress | None = None,
     if missing:
         raise RuntimeError(f"separator returned no {', '.join(missing)} stem")
     (song_dir / "stems").mkdir(exist_ok=True)
+    shutil.rmtree(song_dir / "versions", ignore_errors=True)  # made from the old stems
     for name in STEM_NAMES:
         y = _stereo(stems[name])[: len(audio)]
         if len(y) < len(audio):  # keep every stem the same length, for sync

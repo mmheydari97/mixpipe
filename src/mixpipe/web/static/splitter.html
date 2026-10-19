@@ -59,10 +59,40 @@
         </div>
 
         <div class="card practice">
-          <div class="group">
+          <div class="group dial">
             <label class="lbl" for="speed">Speed</label>
-            <select id="speed"></select>
-            <span class="muted small">same pitch</span>
+            <button id="speed-down" class="nudge" title="10% slower ( - )" aria-label="10% slower">−</button>
+            <input id="speed" type="range" min="0.5" max="3" step="0.1" value="1" list="speed-marks">
+            <datalist id="speed-marks">
+              <option value="0.5"></option><option value="1"></option><option value="1.5"></option>
+              <option value="2"></option><option value="2.5"></option><option value="3"></option>
+            </datalist>
+            <button id="speed-up" class="nudge" title="10% faster ( + )" aria-label="10% faster">+</button>
+            <output id="speed-val" for="speed">100%</output>
+            <button id="speed-reset" class="link" hidden>reset</button>
+          </div>
+          <div class="group dial key-dial">
+            <label class="lbl" for="key">Key</label>
+            <button id="key-down" class="nudge" title="1 semitone (1 fret) down ( , )" aria-label="1 semitone down">♭</button>
+            <input id="key" type="range" min="-12" max="12" step="1" value="0" list="key-marks">
+            <datalist id="key-marks">
+              <option value="-12"></option><option value="-6"></option><option value="0"></option>
+              <option value="6"></option><option value="12"></option>
+            </datalist>
+            <button id="key-up" class="nudge" title="1 semitone (1 fret) up ( . )" aria-label="1 semitone up">♯</button>
+            <output id="key-val" for="key">0</output>
+            <button id="key-reset" class="link" hidden>reset</button>
+            <span id="key-status" class="key-status" role="status" aria-live="polite" hidden></span>
+          </div>
+          <div class="group" role="group" aria-label="Speed engine">
+            <span class="lbl">Stretch</span>
+            <div class="segmented">
+              <button data-engine="browser" aria-pressed="false"
+                title="The browser stretches the audio itself: instant, but rougher away from 100%">Fast</button>
+              <button data-engine="rubberband" aria-pressed="true"
+                title="Rubber Band on the server: much cleaner, ready a few seconds after a change">Accurate</button>
+            </div>
+            <span id="hq-msg" class="muted small" aria-live="polite"></span>
           </div>
           <div class="group" role="group" aria-label="A-B loop">
             <span class="lbl">Loop</span>
@@ -82,7 +112,8 @@
           </div>
         </div>
         <p class="muted small keys">Keys: <kbd>Space</kbd> play/pause · <kbd>←</kbd>/<kbd>→</kbd> 5 s ·
-          <kbd>[</kbd> / <kbd>]</kbd> set A / B · <kbd>L</kbd> loop on/off</p>
+          <kbd>[</kbd> / <kbd>]</kbd> set A / B · <kbd>L</kbd> loop on/off ·
+          <kbd>-</kbd> / <kbd>+</kbd> speed ±10% · <kbd>,</kbd> / <kbd>.</kbd> key ♭ / ♯</p>
       </div>
     </section>
   </main>
