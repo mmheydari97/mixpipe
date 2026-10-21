@@ -57,6 +57,22 @@
             <small id="stt-key-warning" class="warn" hidden>OPENROUTER_API_KEY isn't set on the server. Set it and restart <code>chords-ui</code>.</small>
           </div>
 
+          <label class="field" title="The standard recognizer matches chroma against chord templates. The neural option also asks BTC, a trained transformer (downloads a 12 MB model the first time) and combines both; it needs torch, which Demucs installs.">
+            <span>Chord recognition</span>
+            <select id="recognizer">
+              <option value="template">Standard (chroma templates)</option>
+              <option value="neural">Neural (BTC transformer + templates)</option>
+            </select>
+          </label>
+
+          <label class="field" title="How short a modulation can be and still be marked as a key change. Moves between a major key and its relative minor are never counted.">
+            <span>Key changes</span>
+            <select id="key-changes">
+              <option value="normal">Normal (modulations of ~8+ bars)</option>
+              <option value="sensitive">Sensitive (shorter ones, 3–4 bars; less certain)</option>
+            </select>
+          </label>
+
           <label class="check" id="separate-field">
             <input id="separate" type="checkbox" checked>
             Separate vocals and drums first (Demucs) — recommended for full songs
@@ -92,8 +108,8 @@
           <a id="export-harp" class="button" download hidden>Harmonica tab</a>
         </div>
         <nav class="tabs" role="tablist" aria-label="Instrument">
-          <a id="tab-guitar" role="tab" aria-selected="true">Guitar chords</a>
-          <a id="tab-harmonica" role="tab" aria-selected="false">Harmonica <em>C chromonica</em></a>
+          <a id="tab-guitar" role="tab" aria-selected="true">Chords <em id="chord-instrument">Guitar</em></a>
+          <a id="tab-harmonica" role="tab" aria-selected="false">Harmonica <em id="harp-name">C chromatic</em></a>
         </nav>
       </div>
 
@@ -104,10 +120,24 @@
           <output id="tr-val">0</output>
           <button id="tr-up" aria-label="Transpose up a semitone">+</button>
         </div>
+        <div class="group" id="instrument-group"
+             title="Which instrument the chord shapes are for. Capo and shape suggestions follow it.">
+          <label class="lbl" for="instrument">Instrument</label>
+          <select id="instrument"></select>
+        </div>
         <div class="group" id="capo-group">
           <label class="lbl" for="capo">Capo</label>
           <select id="capo"></select>
           <button id="capo-suggest" class="link" hidden></button>
+        </div>
+        <div class="group" id="harp-group" hidden
+             title="Which harmonica the tab is written for. The melody is moved by octaves to fit it.">
+          <label class="lbl" for="harp-type">Harp</label>
+          <select id="harp-type" aria-label="Harmonica type">
+            <option value="chromatic12">12-hole chromatic</option>
+            <option value="diatonic10">10-hole diatonic</option>
+          </select>
+          <select id="harp-key" aria-label="Harmonica key"></select>
         </div>
         <div class="group" id="octave-group" hidden
              title="Moves the whole melody by octaves. Automatic picks the octave that fits the most notes on the harmonica.">
@@ -151,11 +181,15 @@
 
       <div id="harp-panel" hidden>
         <div class="harp-head">
-          <span class="legend" aria-label="Legend"><b>3↑</b> blow · <b>3↓</b> draw · <b>●</b> button in</span>
+          <span class="legend" id="harp-legend" aria-label="Legend"><b>3↑</b> blow · <b>3↓</b> draw · <b>●</b> button in</span>
           <span id="harp-meta" class="meta"></span>
           <span class="spacer"></span>
+          <label class="check small" title="Keep grace notes and quick runs (down to ~60 ms). May add a few false notes.">
+            <input id="fast-notes" type="checkbox"> Fast notes</label>
+          <button id="add-note-btn" title="Add a note the tracker missed, at the playhead">+ Note</button>
           <button id="melody-btn">Find melody</button>
         </div>
+        <div id="harp-suggest" class="suggest" hidden></div>
         <div id="melody-progress"></div>
         <div id="harp-sheet" class="sheet harp"></div>
       </div>

@@ -10,9 +10,13 @@ get an editable chord sheet:
   the song changes key, the change is marked on the chord where it happens
 - transpose, capo (with a suggestion for open guitar shapes), bar lines, and
   export to ChordPro or plain text
-- a **Harmonica** tab: the sung melody as tab for a 12-hole C chromatic
-  harmonica (Chromonica 48 / 270), with hole, blow or draw, and button for every
-  note, each editable like the chords
+- a **Harmonica** tab: the sung melody as tab for a 12-hole chromatic or a 10-hole
+  diatonic harmonica in any key, with hole, blow or draw, and button or bends for
+  every note, each editable like the chords (split, merge and add notes too)
+- chord shapes for **guitar, ukulele, baritone ukulele** and guitars tuned down, with
+  a capo suggestion for each
+- optional **neural chord recognition** (the BTC transformer) combined with the
+  standard recognizer
 
 Works with a full song (vocals + instruments), a single instrumental track,
 several stems uploaded together, or a link.
@@ -142,42 +146,81 @@ Everything you change is saved immediately.
 
 ### Harmonica tab
 
-Switch with the **Guitar chords | Harmonica** tabs above the sheet (the link
-`#/song/<id>/harmonica` opens it directly). It's written for a **12-hole C
-chromatic harmonica in solo tuning**, which plays C4 to C♯7:
+Switch with the **Chords | Harmonica** tabs above the sheet (the link
+`#/song/<id>/harmonica` opens it directly). Pick the harmonica in the **Harp**
+group: a **12-hole chromatic** (solo tuning, C4 to C♯7 on a C harp) or a **10-hole
+diatonic** (Richter), and its **key**. Any of the 12 keys works; a G harp sits a
+fourth below a C harp, a D♭ harp a semitone above.
 
 ```
-hole   1  2  3  4 | 5  6  7  8 | 9 10 11 12
-blow   C  E  G  C | C  E  G  C | C  E  G  C
-draw   D  F  A  B | D  F  A  B | D  F  A  B      button in = one semitone up
+chromatic  hole   1  2  3  4 | 5  6  7  8 | 9 10 11 12
+(C harp)   blow   C  E  G  C | C  E  G  C | C  E  G  C
+           draw   D  F  A  B | D  F  A  B | D  F  A  B      button in = one semitone up
+
+diatonic   hole   1  2  3  4  5  6  7  8  9  10
+(C harp)   blow   C  E  G  C  E  G  C  E  G  C
+           draw   D  G  B  D  F  A  B  D  F  A              bends fill in the missing notes
 ```
 
 - Each note shows its name over its tab: **`3↑`** = hole 3 blow, **`3↓`** = hole
-  3 draw, **`●`** = button pressed in (`3↓●` = B♭).
+  3 draw, **`●`** = button pressed in (`3↓●` = B♭ on the chromatic). On the diatonic,
+  primes mark a bend: **`2↓′`** half step, **`2↓″`** whole step (that is F4 on a C
+  harp), **`3↓‴`** a step and a half. Overblows and overdraws are not modelled, so a
+  few semitones (E♭ in the low octave of a C harp, for example) are unplayable
+  and shown with a red dashed border.
+- Under the tabs, **Diatonic harps that suit this melody** ranks the 12 keys by how
+  much of the melody they play without bending (and says which position that
+  makes: 1st straight, 2nd cross harp, 3rd slant...). Click one to switch.
 - Notes sit over the lyric words like chords do. A held word can carry several
-  notes, and the gaps between lines become rows of notes in bars.
+  notes, over the right syllable, and the gaps between lines become rows of notes
+  in bars.
 - **Click a note** to open its menu:
   - the three candidates, each with its tab, confidence and **▶ hear** (plays
     that bit of the song with the note on top)
-  - **Play as**, for notes with more than one fingering (F = `2↓` or `2↑●`,
-    C5 = `4↑`, `5↑` or `4↓●`). By default the tab uses no button when it can,
-    then the hole nearest the previous note
+  - **Play as**, for notes with more than one fingering (F = `2↓` or `2↑●`, G on
+    the diatonic = `2↓` or `3↑`). By default the tab uses no bend and no button when
+    it can, then the hole nearest the previous note
   - a box for typing any note: `F#`, `Bb`, `C5`. Without an octave, the nearest
     one is used
+  - **✂ Split** the note in two (at the playhead if it is inside the note, else in
+    the middle) when the tracker held two repeated notes as one, and **⇥ Merge
+    with next** to join a note that was cut in two
   - **✕ Not a note** for anything that isn't really part of the melody
     (restore it from the same menu)
-- **Octave − / +**: the melody is moved by whole octaves so as many notes as
-  possible fit the harmonica (picked automatically from the sung notes).
+- **+ Note** adds a note the tracker missed, starting at the playhead.
+- **Octave − / +**: the melody is moved by whole octaves so as much of it as
+  possible fits the harmonica (picked automatically from the sung notes).
   Change it if you'd rather play higher or lower; *automatic* goes back.
-  Notes that still don't fit get a red dashed border and `—`. **Transpose**
-  applies here too; capo doesn't.
-- Where nobody sings, the notes are a rough guess from the instruments, shown
-  faded. Expect to fix those, or remove them.
+  **Transpose** applies here too; capo doesn't.
+- **Fast notes** (tick it before *Find melody*) keeps grace notes and quick runs
+  down to about 60 ms. It can add the odd false note.
+- Where nobody sings, the notes are a guess from the instruments (a salience tracker
+  that follows the top line over the chords), shown faded. Expect to fix those, or
+  remove them.
 - **Find melody** appears for songs analysed before the harmonica tab existed.
   It takes a few seconds per minute of audio and keeps your chord and lyric
   edits. **Re-detect melody** (click twice) finds the notes again and replaces
-  your edits on this tab.
+  your note edits on this tab; the harp you picked stays.
 - **Harmonica tab** downloads a plain-text version (`<song-id>.harp.txt`).
+
+### Other options on the page
+
+- **Instrument** (Chords tab): guitar, guitar tuned down a half or whole step,
+  ukulele (GCEA or D tuning), baritone ukulele. The chord shapes shown, the capo
+  and its suggestion follow it; the sounding chords don't change.
+- **Chord recognition** (new-song form): *Standard* matches chroma against chord
+  templates. *Neural* also runs BTC (a pretrained transformer, MIT licence, by Park
+  et al.) and combines both. The first time it downloads 12 MB into
+  `~/.cache/mixpipe/models/btc` (or `$MIXPIPE_MODEL_DIR`) after checking a pinned
+  SHA-256; `python -m mixpipe.cli fetch-model btc` does that ahead of time. If it can't
+  be used the standard recognizer runs and the page says so.
+- **Key changes** (new-song form): *Normal* marks modulations of about 8+ bars,
+  *Sensitive* also 3-4 bar excursions (their key is less certain).
+- **Meter changes**: if the song moves between 2, 3 and 4 beats per bar, the badge row
+  says where ("3/4 from bar 9") and the bar lines follow. Setting the time signature by hand
+  replaces the detected changes; *reset* restores them.
+- **Cancel** a queued or running analysis from its progress panel; the queue shows how
+  many jobs are ahead. `chords-ui --workers 2` runs two songs at once if you have the memory.
 
 ## 4. Headless (no browser)
 
@@ -198,6 +241,9 @@ PYTHONPATH=src python -m mixpipe.cli chords "https://open.spotify.com/track/..."
 | `--stt` | `mlx` | `mlx` = local Whisper, `openrouter` = cloud |
 | `--stt-model` | | OpenRouter model id, required with `--stt openrouter` (e.g. `openai/whisper-large-v3-turbo`) |
 | `--no-separate` | off | skip Demucs on a single full-mix file |
+| `--recognizer` | `template` | `neural` also asks the BTC model (12 MB, downloaded once) |
+| `--key-changes` | `normal` | `sensitive` marks shorter modulations |
+| `--no-retime` | off | keep estimated word times from text-only OpenRouter models |
 | `--title` | file name / link title | song title |
 | `--out` | `out/chords` | song store directory |
 | `--quiet` | off | no progress output |
@@ -212,7 +258,7 @@ Only needed for cloud transcription or *Polish lyrics*. Set the key in the
 same terminal **before** starting the UI:
 
 ```bash
-export OPENROUTER_API_KEY=sk-or-...
+export OPENROUTER_API_KEY=sk-or-...      # or put it in .env (copy .env_template); both UIs read it
 make chords-ui
 ```
 
@@ -257,7 +303,7 @@ out/chords/<song-id>/
 | first transcription seems stuck | it's downloading Whisper (~1.6 GB) once |
 | `You are sending unauthenticated requests to the HF Hub` | harmless; setting `HF_TOKEN` only speeds up the download |
 | `address already in use` | another server is on 8765: `... chords-ui --port 8766` |
-| *OPENROUTER_API_KEY isn't set* in the page | export the key, then **restart** the UI |
+| *OPENROUTER_API_KEY isn't set* in the page | put the key in `.env` (copy `.env_template`) or export it, then **restart** the UI |
 | lyrics include words that were never sung | pick the language explicitly instead of Auto-detect, or fix them with *Edit lyrics* |
 | not on Apple Silicon | `mlx-whisper` won't install: delete its line from `requirements-chords.txt`, install as in step 2, then `pip install faster-whisper`. Transcription then runs on the CPU (slower; untested on other machines) |
 
@@ -269,8 +315,9 @@ make test
 PYTHONPATH=src python -m pytest tests/test_chords.py -q
 ```
 
-No models are downloaded and no network is needed: separation and
-transcription are faked in the tests.
+No models are downloaded and no network is needed: separation, transcription and
+the neural model are faked in the tests (`tests/test_neural.py` uses random weights and
+a `file://` download).
 
 Known limitations (accuracy, meter, key changes, melody) are listed in
 [`TODO.md`](../../../TODO.md#chord-finder).

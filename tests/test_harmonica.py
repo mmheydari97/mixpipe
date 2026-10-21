@@ -329,3 +329,291 @@ def test_api_harmonica_flow(tmp_path, wav_bytes):
     assert again["harmonica"] and len(again["harmonica"]["notes"]) == 3
     assert next(c for c in again["chords"] if c["id"] == cid)["custom"] == "Cadd9"
     assert calls == [1, 1]   # re-detect ignores the cache
+
+
+# --------------------------------------------------------------------------- #
+# other harmonicas: diatonic, other keys
+# --------------------------------------------------------------------------- #
+
+from mixpipe.chords.harmonica import (Instrument, add_note, get_instrument,  # noqa: E402
+                                      instrument_of, merge_notes, position_name,
+                                      split_note, suggest_instruments)
+
+
+def dtabs(midi, key="C", kind="diatonic10"):
+    return [f["tab"] for f in get_instrument(kind, key).fingerings(midi)]
+
+
+def test_diatonic_layout_matches_a_c_harp_chart():
+    c = get_instrument("diatonic10", "C")
+    assert (c.lowest, c.highest) == (60, 96)
+    assert dtabs(60) == ["1↑"] and dtabs(62) == ["1↓"] and dtabs(64) == ["2↑"]
+    assert set(dtabs(67)) == {"2↓", "3↑"}
+    assert dtabs(65) == ["2↓″"]                  # F4: 2 draw, whole-step bend
+    assert dtabs(66) == ["2↓′"]                  # F#4: half-step bend
+    assert dtabs(68) == ["3↓‴"]                  # A♭4: 3 draw, 1½ steps
+    assert dtabs(69) == ["3↓″"] and dtabs(70) == ["3↓′"] and dtabs(71) == ["3↓"]
+    assert dtabs(61) == ["1↓′"]                  # C#4
+    assert dtabs(94) == ["10↑″"] and dtabs(95) == ["10↑′"]   # blow bends on hole 10
+    assert dtabs(63) == [] and dtabs(75) == []   # E♭ needs an overblow: not modelled
+    assert dtabs(59) == [] and dtabs(97) == []
+
+
+def test_unbent_notes_are_listed_first():
+    f = get_instrument("diatonic10", "C").fingerings(67)       # G4: 3 blow, 2 draw
+    assert [x["bend"] for x in f] == [0, 0]
+    e5 = get_instrument("diatonic10", "C").fingerings(76)      # E5: 5 blow beats a 5 draw bend
+    assert e5[0]["tab"] == "5↑" and e5[1]["bend"] == 1
+    assert choose_fingering(e5, 9) == 0          # no bend wins even when the bent hole is nearer
+
+
+def test_harp_keys_shift_the_layout():
+    assert get_instrument("diatonic10", "G").lowest == 55          # G3, a fourth below C
+    assert get_instrument("diatonic10", "A").lowest == 57
+    assert get_instrument("diatonic10", "Db").lowest == 61
+    assert get_instrument("diatonic10", "F#").lowest == 66
+    assert get_instrument("chromatic12", "G").highest == HIGHEST - 5
+    # the same tab sounds different notes: 4 blow is the key's high C-equivalent
+    assert dtabs(72 - 5, "G") == ["4↑"]
+    assert get_instrument("diatonic10", 7) is get_instrument("diatonic10", "G")
+    with pytest.raises(ValueError):
+        get_instrument("tremolo", "C")
+    with pytest.raises(ValueError):
+        get_instrument("diatonic10", "H")
+    assert Instrument("chromatic12", "C").name == "C 12-hole chromatic, solo tuning"
+
+
+def test_fit_octave_counts_only_playable_notes():
+    c = get_instrument("diatonic10", "C")
+    # E♭4 and E♭5 need an overblow, E♭6 is a bent 8 blow: a long E♭5 is moved up an octave
+    assert fit_octave([(75, 5.0), (74, 1.0)], c) == 1
+    assert fit_octave([(62, 1.0), (64, 1.0)], c) == 0           # D4 and E4 are fine where they are
+    assert fit_octave([(48 + 2, 1.0), (48 + 4, 1.0)], c) == 1
+
+
+@pytest.fixture
+def cmajor_sheet(harp_sheet):
+    """A melody that sits in C major and lies on a C diatonic without bends."""
+    harp_sheet["key"], harp_sheet["key_label"] = "C:maj", "C major"
+    midis = [60, 64, 67, 72, 67, 64, 60]
+    harp_sheet["melody"]["notes"] = [N(f"n{i}", m, 1.0 + 0.4 * i, 1.35 + 0.4 * i)
+                                     for i, m in enumerate(midis)]
+    return harp_sheet
+
+
+def test_diatonic_view_and_settings(cmajor_sheet):
+    apply_settings(cmajor_sheet, harmonica_type="diatonic10", harmonica_key="C")
+    assert instrument_of(cmajor_sheet).name.startswith("C 10-hole diatonic")
+    hv = harmonica_view(cmajor_sheet)
+    assert hv["instrument"] == {"type": "diatonic10", "key": "C", "name": "C 10-hole diatonic (Richter)",
+                                "short_name": "C diatonic", "diatonic": True}
+    # G4 is 2 draw or 3 blow: the hole nearest the previous note wins each time
+    assert [n["tab"] for n in hv["notes"]] == ["1↑", "2↑", "2↓", "4↑", "3↑", "2↑", "1↑"]
+    assert hv["octave"] == 0 and hv["in_range"] == 1.0
+    assert hv["range"] == ["C4", "C7"] and hv["fast"] is False
+    assert position_name(cmajor_sheet, instrument_of(cmajor_sheet)) == "1st (straight harp)"
+    # changing harp resets pinned fingerings
+    cmajor_sheet["melody"]["notes"][3]["fingering"] = 0
+    apply_settings(cmajor_sheet, harmonica_key="G")
+    assert cmajor_sheet["melody"]["notes"][3]["fingering"] is None
+    assert instrument_of(cmajor_sheet).kind == "diatonic10" and instrument_of(cmajor_sheet).pc == 7
+    with pytest.raises(ValueError):
+        apply_settings(cmajor_sheet, harmonica_type="kazoo")
+    with pytest.raises(ValueError):
+        apply_settings(cmajor_sheet, harmonica_key="Q")
+
+
+def test_suggestions_rank_harps_by_how_little_they_bend(cmajor_sheet):
+    best = suggest_instruments(cmajor_sheet)
+    assert best[0]["key"] == "C" and best[0]["unbent"] == 1.0 and best[0]["playable"] == 1.0
+    assert best[0]["position"] == "1st (straight harp)"
+    # cross harp for a song in C is the F harp
+    f = next(r for r in suggest_instruments(cmajor_sheet, limit=12) if r["key"] == "F")
+    assert f["position"] == "2nd (cross harp)"
+    assert [r["unbent"] for r in best] == sorted((r["unbent"] for r in best), reverse=True)
+    assert all(0.0 <= r["playable"] <= 1.0 for r in best)
+    del cmajor_sheet["melody"]
+    assert suggest_instruments(cmajor_sheet) == []
+
+
+def test_diatonic_text_export(cmajor_sheet):
+    apply_settings(cmajor_sheet, harmonica_type="diatonic10", harmonica_key="C")
+    text = to_harp_text(cmajor_sheet)
+    assert "C 10-hole diatonic (Richter) harmonica" in text and "bend" in text
+    assert "Position: 1st (straight harp)" in text
+    # a bent note shows its primes
+    cmajor_sheet["melody"]["notes"].append(N("n9", 65, 5.0, 5.4))     # F4
+    assert "2↓″" in to_harp_text(cmajor_sheet)
+
+
+# --------------------------------------------------------------------------- #
+# editing notes
+# --------------------------------------------------------------------------- #
+
+def ids(sheet):
+    return [n["id"] for n in sorted(sheet["melody"]["notes"], key=lambda n: n["start"])]
+
+
+def test_split_note(harp_sheet):
+    new = split_note(harp_sheet, "n3", 2.5)
+    notes = {n["id"]: n for n in harp_sheet["melody"]["notes"]}
+    assert (notes["n3"]["start"], notes["n3"]["end"]) == (2.3, 2.5)
+    assert (notes[new]["start"], notes[new]["end"]) == (2.5, 2.7)
+    assert notes[new]["candidates"] == notes["n3"]["candidates"] and new == "n6"
+    assert notes[new]["candidates"] is not notes["n3"]["candidates"]
+    mid = split_note(harp_sheet, "n4")
+    assert abs(next(n for n in harp_sheet["melody"]["notes"] if n["id"] == mid)["start"] - 3.0) < 1e-6
+    for bad in (2.3, 2.31, 9.0):
+        with pytest.raises(ValueError):
+            split_note(harp_sheet, "n0", bad)
+    with pytest.raises(ValueError):
+        split_note(harp_sheet, "nope")
+
+
+def test_merge_notes(harp_sheet):
+    notes = harp_sheet["melody"]["notes"]
+    notes[3]["custom"] = "D4"                     # the longer note decides the pitch... equal: first wins
+    merged = merge_notes(harp_sheet, ["n3", "n4"])
+    assert merged == "n3"
+    n3 = next(n for n in harp_sheet["melody"]["notes"] if n["id"] == "n3")
+    assert (n3["start"], n3["end"]) == (2.3, 3.2) and "n4" not in ids(harp_sheet)
+    with pytest.raises(ValueError):
+        merge_notes(harp_sheet, ["n0", "n2"])      # not neighbours (n1 between)
+    with pytest.raises(ValueError):
+        merge_notes(harp_sheet, ["n0"])
+    # the longer note's pitch wins
+    harp_sheet["melody"]["notes"][0]["end"] = 1.1
+    harp_sheet["melody"]["notes"][1]["candidates"][0]["midi"] = 56
+    assert merge_notes(harp_sheet, ["n0", "n1"]) == "n0"
+    assert next(n for n in harp_sheet["melody"]["notes"] if n["id"] == "n0")["candidates"][0]["midi"] == 56
+
+
+def test_add_note(harp_sheet):
+    nid = add_note(harp_sheet, 4.0, 4.5, "D4")
+    note = next(n for n in harp_sheet["melody"]["notes"] if n["id"] == nid)
+    # typed as shown on the tab: this melody is shown an octave up, so D4 is stored as D3
+    assert note["source"] == "user" and note["candidates"][0]["midi"] == 50
+    assert nid == "n6" and ids(harp_sheet)[-2] == "n6"
+    hv = harmonica_view(harp_sheet)
+    shown = next(n for n in hv["notes"] if n["id"] == nid)
+    assert shown["display"] == "D" and shown["midi"] == 62
+    with pytest.raises(ValueError, match="overlaps"):
+        add_note(harp_sheet, 2.4, 2.9, "C")
+    with pytest.raises(ValueError, match="at least"):
+        add_note(harp_sheet, 7.0, 7.01, "C")
+    with pytest.raises(ValueError, match="isn't a note"):
+        add_note(harp_sheet, 7.0, 7.5, "zz")
+    with pytest.raises(ValueError, match="isn't a note"):
+        add_note(harp_sheet, 7.0, 7.5, "rest")
+    # octave-less names land near the melody, with the user's transpose in mind
+    harp_sheet["transpose"] = 2
+    nid2 = add_note(harp_sheet, 8.0, 8.5, "B")
+    shown = next(n for n in harmonica_view(harp_sheet)["notes"] if n["id"] == nid2)
+    assert shown["display"] == "B"
+
+
+def test_api_note_editing_and_harmonica_settings(tmp_path, wav_bytes):
+    from fastapi.testclient import TestClient
+
+    from mixpipe.web.server import create_app
+    from test_chords import fake_separator, fake_transcriber
+
+    t = np.arange(SR * 8) / SR
+    y = (0.3 * np.sin(2 * np.pi * 262 * t)).astype(np.float32)
+    seen = []
+
+    def melody(vocal, sr, regions, fallback=None, key=None, progress=None, fast=False):
+        seen.append(fast)
+        return fake_melody(vocal, sr, regions, fallback, key, progress)
+
+    client = TestClient(create_app(tmp_path, separator=fake_separator,
+                                   transcriber=fake_transcriber, melody_extractor=melody,
+                                   run_inline=True))
+    sid = client.post("/api/songs", files=[("files", ("s.wav", wav_bytes(y, SR), "audio/wav"))],
+                      data={"language": "en"}).json()["id"]
+    post = lambda body: client.post(f"/api/songs/{sid}/notes", json=body)  # noqa: E731
+
+    v = post({"action": "split", "id": "n0", "at": 4.25}).json()
+    assert len(v["harmonica"]["notes"]) == 4
+    v = post({"action": "merge", "ids": ["n0", "n3"]}).json()
+    assert len(v["harmonica"]["notes"]) == 3
+    v = post({"action": "add", "start": 6.0, "end": 6.5, "note": "C5"}).json()
+    assert v["harmonica"]["notes"][-1]["source"] == "user"
+    assert post({"action": "add", "start": 4.2, "end": 4.9, "note": "C5"}).status_code == 400   # overlaps
+    assert post({"action": "split"}).status_code == 400
+    assert post({"action": "add", "note": "C"}).status_code == 400
+    assert post({"action": "explode"}).status_code == 400
+    assert post({"action": "split", "id": "n99"}).status_code == 400
+
+    v = client.patch(f"/api/songs/{sid}/settings",
+                     json={"harmonica_type": "diatonic10", "harmonica_key": "G"}).json()
+    assert v["harmonica"]["instrument"]["short_name"] == "G diatonic"
+    assert client.patch(f"/api/songs/{sid}/settings", json={"harmonica_key": "?"}).status_code == 400
+    assert client.get(f"/api/songs/{sid}/export?fmt=harp").text.count("G 10-hole diatonic") == 1
+
+    # re-detecting keeps the chosen harmonica; fast notes reach the extractor
+    assert client.post(f"/api/songs/{sid}/melody", json={"fast": True}).status_code == 200
+    again = client.get(f"/api/songs/{sid}").json()
+    assert again["harmonica"]["instrument"]["key"] == "G" and again["harmonica"]["fast"] is True
+    assert seen == [False, True]
+
+
+# --------------------------------------------------------------------------- #
+# melody extraction: polyphonic fallback, fast notes
+# --------------------------------------------------------------------------- #
+
+def _tone(midi, dur, amp=0.3, harmonics=6):
+    f = 440 * 2 ** ((midi - 69) / 12)
+    t = np.arange(int(dur * SR)) / SR
+    return sum(amp * 0.6 ** (h - 1) * np.sin(2 * np.pi * f * h * t)
+               for h in range(1, harmonics + 1) if f * h < SR / 2)
+
+
+def _faded(midi, dur):
+    n = int(dur * SR)
+    env = np.ones(n)
+    k = int(0.01 * SR)
+    env[:k], env[-k:] = np.linspace(0, 1, k), np.linspace(1, 0, k)
+    return _tone(midi, dur) * env
+
+
+def test_instrument_fallback_follows_a_lead_over_chords():
+    tune = [(72, .5), (74, .5), (76, .5), (77, .5), (79, 1.0), (76, .5), (72, .5), (74, .5),
+            (71, .5), (72, 1.0)]
+    lead = np.concatenate([_faded(m, d) for m, d in tune])
+    n = len(lead)
+    comp = np.zeros(n)
+    step = int(1.25 * SR)
+    for i, chord in enumerate([[60, 64, 67], [59, 62, 67], [60, 64, 69], [60, 65, 69]] * 3):
+        a, b = i * step, min(n, (i + 1) * step)
+        if a >= n:
+            break
+        for m in chord:
+            comp[a:b] += _tone(m, (b - a) / SR, 0.12)[:b - a]
+    mix = lead + comp
+    mix = (mix / np.abs(mix).max() * 0.8).astype(np.float32)
+    out = extract_melody(None, SR, [], fallback=mix, key="C:maj")
+    truth, t0 = [], 0.0
+    for m, d in tune:
+        truth.append((t0, t0 + d, m))
+        t0 += d
+    hit = total = 0.0
+    for a, b, m in truth:
+        total += b - a
+        for note in out["notes"]:
+            if note["end"] > a and note["start"] < b and note["candidates"][0]["midi"] == m:
+                hit += min(b, note["end"]) - max(a, note["start"])
+    assert hit / total > 0.85
+    assert all(n["source"] == "instr" for n in out["notes"])
+
+
+def test_fast_mode_keeps_quick_notes():
+    parts = [np.zeros(int(0.5 * SR))]
+    for m, d in [(60, 0.4), (64, 0.07), (62, 0.07), (60, 0.07), (62, 0.4)]:
+        parts.append(sung(m, d))
+    y = np.concatenate(parts).astype(np.float32)
+    regions = [(0.5, len(y) / SR)]
+    normal = extract_melody(y, SR, regions, key="C:maj")["notes"]
+    fast = extract_melody(y, SR, regions, key="C:maj", fast=True)["notes"]
+    assert len(fast) > len(normal)
+    assert len(fast) >= 4

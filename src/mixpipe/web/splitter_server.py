@@ -44,16 +44,18 @@ def create_app(
     run_inline: bool = False,
     resolver=None,
     downloader=None,
+    workers: int = 1,
 ) -> FastAPI:
     """Build the app. `separator`/`resolver`/`downloader` are injectable for
     tests, and `run_inline` separates synchronously instead of in the worker."""
     app = FastAPI(title="mixpipe splitter")
 
     def job(d: Path, options: dict):
-        return pipeline.run_job(d, options, separator=separator, downloader=downloader)
+        return pipeline.run_job(d, options, cancelled=svc.cancelled(d.name),
+                                separator=separator, downloader=downloader)
 
     svc = SongService(root, job, done_file="stems.json", done_stage="separate",
-                      run_inline=run_inline, name="splitter")
+                      run_inline=run_inline, name="splitter", workers=workers)
     add_song_routes(app, svc, parse_options, resolver=resolver)
     maker = versions.Maker()
 

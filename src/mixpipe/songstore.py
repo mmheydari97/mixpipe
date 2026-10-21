@@ -25,6 +25,10 @@ from .io_utils import UPLOAD_EXTS
 Progress = Callable[[str, float, str], None]
 
 
+class JobCancelled(Exception):
+    """Raised inside a job (from its progress callback) once the user cancelled it."""
+
+
 def _slug(text: str) -> str:
     s = re.sub(r"[^\w-]+", "-", text.strip().lower(), flags=re.UNICODE).strip("-")
     return s[:40] or "song"
@@ -139,20 +143,35 @@ def get_status(song_dir: Path) -> dict:
     return status
 
 
-def run_job(song_dir: Path, work: Callable[[Progress], object], done_stage: str):
+def run_job(song_dir: Path, work: Callable[[Progress], object], done_stage: str,
+            cancelled: Callable[[], bool] | None = None):
     """Run work(progress) with status.json bookkeeping; never raises. Returns
-    work's result, or None if it failed (the error is in status.json)."""
+    work's result, or None if it failed (the error is in status.json) or was
+    cancelled (state "cancelled").
+
+    `cancelled()` is polled every time the job reports progress, so a job stops at
+    its next progress report. A step that doesn't report while it runs (a model
+    call) finishes first."""
     song_dir = Path(song_dir)
     last = {"t": 0.0}
 
     def progress(stage: str, frac: float, msg: str) -> None:
+        if cancelled is not None and cancelled():
+            raise JobCancelled()
         now = time.monotonic()
         if frac in (0.0, 1.0) or now - last["t"] > 0.5:
             last["t"] = now
             set_status(song_dir, "running", stage, frac, msg)
 
     try:
+        if cancelled is not None and cancelled():
+            raise JobCancelled()
         result = work(progress)
+    except JobCancelled:
+        st = get_status(song_dir)
+        set_status(song_dir, "cancelled", st.get("stage", "decode"), st.get("progress", 0.0),
+                   "cancelled")
+        return None
     except Exception as exc:  # noqa: BLE001 - surface any failure to the UI
         st = get_status(song_dir)
         error = str(exc) if isinstance(exc, FetchError) else f"{type(exc).__name__}: {exc}"

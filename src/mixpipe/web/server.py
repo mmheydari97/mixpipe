@@ -2,8 +2,9 @@
 
     python -m mixpipe.cli chords-ui          # http://127.0.0.1:8765
 
-Songs are analysed one at a time in a background worker (the GPU models don't
-share well); the page polls /status while a job runs.
+Songs are analysed in a background queue, one at a time unless `workers` says
+otherwise (the GPU models don't share well); the page polls /status while a job
+runs and can cancel it.
 """
 
 from __future__ import annotations
@@ -17,10 +18,11 @@ from pydantic import BaseModel
 
 from ..chords import pipeline
 from ..chords.align import lines_to_text, reanchor, word_diff
-from ..chords.harmonica import note_from_display, set_fingering, to_harp_text
+from ..chords.harmonica import (add_note, merge_notes, note_from_display, set_fingering,
+                                split_note, to_harp_text)
 from ..chords.sheet import (apply_settings, custom_from_display, load_sheet, save_sheet,
                             to_chordpro, to_text, view)
-from .common import SongService, add_page, add_song_routes, as_bool
+from .common import SongService, add_openrouter_routes, add_page, add_song_routes, as_bool
 
 # Python's mimetypes guesses e.g. audio/mp4a-latm for .m4a, which Safari won't play
 AUDIO_TYPES = {
@@ -48,7 +50,10 @@ def parse_options(fields: dict) -> dict:
     if stt == "openrouter" and not stt_model:
         raise HTTPException(400, "pick an OpenRouter transcription model")
     return {"language": str(fields.get("language") or "auto"), "stt": stt,
-            "stt_model": stt_model, "separate": as_bool(fields.get("separate"), True)}
+            "stt_model": stt_model, "separate": as_bool(fields.get("separate"), True),
+            "retime": as_bool(fields.get("retime"), True),
+            "key_changes": "sensitive" if fields.get("key_changes") == "sensitive" else "normal",
+            "recognizer": "neural" if fields.get("recognizer") == "neural" else "template"}
 
 
 class LyricsIn(BaseModel):
@@ -67,6 +72,20 @@ class NoteIn(BaseModel):
     auto_fingering: bool = False
 
 
+class NoteEdit(BaseModel):
+    action: str                      # split | merge | add
+    id: str | None = None            # split: the note
+    ids: list[str] | None = None     # merge: neighbouring notes
+    at: float | None = None          # split: where (seconds); default the middle
+    start: float | None = None       # add
+    end: float | None = None
+    note: str | None = None          # add: as typed on the tab, e.g. "C5" or "Bb"
+
+
+class MelodyIn(BaseModel):
+    fast: bool = False               # keep grace notes and quick runs
+
+
 class PolishIn(BaseModel):
     model: str
 
@@ -79,6 +98,9 @@ class SettingsIn(BaseModel):
     shift_downbeat: int | None = None
     reset_meter: bool = False
     harmonica_octave: int | None = None
+    harmonica_type: str | None = None
+    harmonica_key: str | None = None
+    instrument: str | None = None
 
 
 def create_app(
@@ -89,21 +111,26 @@ def create_app(
     resolver=None,
     downloader=None,
     melody_extractor=None,
+    retimer=None,
+    neural_provider=None,
+    workers: int = 1,
 ) -> FastAPI:
     """Build the app. `separator`/`transcriber`/`resolver`/`downloader`/
-    `melody_extractor` are injectable for tests, and `run_inline` runs analysis
+    `melody_extractor`/`retimer` are injectable for tests, and `run_inline` runs analysis
     synchronously instead of in the worker thread."""
     root = Path(root)
     app = FastAPI(title="mixpipe chords")
     sheet_lock = threading.Lock()
 
     def job(d: Path, options: dict):
-        return pipeline.run_job(d, options, separator=separator, transcriber=transcriber,
+        return pipeline.run_job(d, options, cancelled=svc.cancelled(d.name),
+                                separator=separator, transcriber=transcriber,
                                 root=root, downloader=downloader,
-                                melody_extractor=melody_extractor)
+                                melody_extractor=melody_extractor, retimer=retimer,
+                                neural_provider=neural_provider)
 
     svc = SongService(root, job, done_file="sheet.json", done_stage="align",
-                      run_inline=run_inline, name="chords")
+                      run_inline=run_inline, name="chords", workers=workers)
     song_dir, sheet_path = svc.song_dir, svc.result_path
     add_song_routes(app, svc, parse_options, resolver=resolver)
 
@@ -170,16 +197,40 @@ def create_app(
             save_sheet(sheet, p)
         return view(sheet)
 
+    @app.post("/api/songs/{song_id}/notes")
+    def edit_notes(song_id: str, body: NoteEdit):
+        """Split, merge or add melody notes; returns the whole view."""
+        p = sheet_path(song_id)
+        with sheet_lock:
+            sheet = load_sheet(p)
+            try:
+                if body.action == "split":
+                    if not body.id:
+                        raise ValueError("say which note to split")
+                    split_note(sheet, body.id, body.at)
+                elif body.action == "merge":
+                    merge_notes(sheet, body.ids or [])
+                elif body.action == "add":
+                    if body.start is None or body.end is None or not body.note:
+                        raise ValueError("a new note needs start, end and a pitch")
+                    add_note(sheet, body.start, body.end, body.note)
+                else:
+                    raise ValueError("action must be split, merge or add")
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            save_sheet(sheet, p)
+        return view(sheet)
+
     @app.post("/api/songs/{song_id}/melody")
-    def find_melody(song_id: str):
+    def find_melody(song_id: str, body: MelodyIn | None = None):
         """Find (or re-find) the melody for the harmonica tab; poll /status."""
         d = song_dir(song_id)
         sheet_path(song_id)
+        fast = bool(body and body.fast)
         pipeline.set_status(d, "queued", "decode", 0.0, "waiting")
-        if run_inline:
-            pipeline.run_melody_job(d, lock=sheet_lock, extractor=melody_extractor)
-        else:
-            svc.worker.submit(pipeline.run_melody_job, d, sheet_lock, melody_extractor)
+        svc.submit(song_id, lambda: pipeline.run_melody_job(
+            d, lock=sheet_lock, extractor=melody_extractor, fast=fast,
+            cancelled=svc.cancelled(song_id)))
         return {"id": song_id}
 
     @app.patch("/api/songs/{song_id}/settings")
@@ -238,26 +289,13 @@ def create_app(
 
     # ---- OpenRouter catalogue ---------------------------------------------------
 
-    @app.get("/api/openrouter/status")
-    def or_status():
-        from .. import openrouter
+    def with_word_timing(kind: str, models: list[dict]) -> list[dict]:
+        if kind != "transcription":
+            return models
+        caps = pipeline.openrouter_caps(root)       # what earlier songs found out per model
+        return [{**m, "word_timing": caps.get(m["id"])} for m in models]
 
-        return {"has_key": openrouter.api_key() is not None}
-
-    @app.get("/api/openrouter/models")
-    def or_models(kind: str = "chat"):
-        from .. import openrouter
-
-        try:
-            models = openrouter.list_models(kind)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(502, f"couldn't reach OpenRouter: {exc}") from exc
-        if kind == "transcription":
-            caps = pipeline.openrouter_caps(root)
-            models = [{**m, "word_timing": caps.get(m["id"])} for m in models]
-        return models
+    add_openrouter_routes(app, with_word_timing)
 
     add_page(app, "index.html")
     return app

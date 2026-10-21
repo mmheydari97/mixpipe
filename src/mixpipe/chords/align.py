@@ -29,16 +29,30 @@ def _visible(chords: list[dict]) -> list[dict]:
 
 
 class BarGrid:
-    """Bars laid over the beat grid: `beats_per_bar` beats per bar, the bar
-    starting at beat index `downbeat`. Beats before the first or after the last
-    tracked beat are extrapolated at `beat_period`."""
+    """Bars laid over the beat grid.
+
+    A plain grid has `beats_per_bar` beats per bar with the bar starting at beat
+    index `downbeat`. With `sections` ([{"beat", "beats_per_bar"}], the beat of each
+    section's first downbeat) the meter can change along the way: each section
+    runs in its own meter until the next one starts (a last short bar is allowed),
+    and bars are numbered straight through. Beats before the first or after the
+    last tracked beat are extrapolated at `beat_period`."""
 
     def __init__(self, beat_times: list[float], beats_per_bar: int = 4,
-                 downbeat: int = 0, beat_period: float = 0.5):
+                 downbeat: int = 0, beat_period: float = 0.5, sections: list[dict] | None = None):
         self.bt = list(beat_times) or [0.0]
-        self.m = max(1, int(beats_per_bar))
-        self.p = int(downbeat) % self.m
         self.period = beat_period if beat_period > 0 else 0.5
+        if sections:
+            secs = sorted(({"beat": int(sec["beat"]), "m": max(1, int(sec["beats_per_bar"]))}
+                           for sec in sections), key=lambda sec: sec["beat"])
+        else:
+            m = max(1, int(beats_per_bar))
+            secs = [{"beat": int(downbeat) % m, "m": m}]
+        self.secs = secs
+        self.m, self.p = secs[0]["m"], secs[0]["beat"] % secs[0]["m"]
+        self.bars_before = [0]
+        for a, b in zip(secs, secs[1:]):
+            self.bars_before.append(self.bars_before[-1] + max(1, -(-(b["beat"] - a["beat"]) // a["m"])))
 
     def beat_index(self, t: float) -> int:
         bt = self.bt
@@ -48,8 +62,21 @@ class BarGrid:
             return len(bt) - 1 + int((t - bt[-1] + 0.08) // self.period)
         return bisect.bisect_right(bt, t + 0.08) - 1
 
+    def _section_of_beat(self, beat: int) -> int:
+        return max(0, bisect.bisect_right([sec["beat"] for sec in self.secs], beat) - 1)
+
     def bar_of(self, t: float) -> int:
-        return (self.beat_index(t) - self.p) // self.m
+        beat = self.beat_index(t)
+        k = self._section_of_beat(beat)
+        return self.bars_before[k] + (beat - self.secs[k]["beat"]) // self.secs[k]["m"]
+
+    def chord_bar(self, t: float) -> int:
+        """The bar a chord that starts at `t` is written in. A change that lands
+        within a half beat before a bar line anticipates it (a push), so it is
+        written in the bar it leads into."""
+        k = self.bar_of(t)
+        gap = self.bar_start(k + 1) - t
+        return k + 1 if 0.12 * self.period < gap <= 0.6 * self.period else k
 
     def beat_time(self, idx: int) -> float:
         if idx < 0:
@@ -59,7 +86,13 @@ class BarGrid:
         return self.bt[idx]
 
     def bar_start(self, k: int) -> float:
-        return self.beat_time(self.p + k * self.m)
+        s = max(0, bisect.bisect_right(self.bars_before, k) - 1)
+        return self.beat_time(self.secs[s]["beat"] + (k - self.bars_before[s]) * self.secs[s]["m"])
+
+    def section_changes(self) -> list[dict]:
+        """Where the meter changes after the first section: [{"bar", "time", "beats_per_bar"}]."""
+        return [{"bar": self.bars_before[i], "time": self.bar_start(self.bars_before[i]),
+                 "beats_per_bar": sec["m"]} for i, sec in enumerate(self.secs) if i > 0]
 
 
 def grid_for(sheet: dict) -> BarGrid | None:
@@ -67,18 +100,36 @@ def grid_for(sheet: dict) -> BarGrid | None:
     meter = sheet.get("meter")
     if not meter or not sheet.get("beat_times"):
         return None
+    sections = meter.get("sections") or None
+    if sections and len(sections) < 2:
+        sections = None
     return BarGrid(sheet["beat_times"], meter.get("beats_per_bar", 4),
-                   meter.get("downbeat", 0), sheet.get("beat_period", 0.5))
+                   meter.get("downbeat", 0), sheet.get("beat_period", 0.5), sections=sections)
+
+
+def syllable_index(spans: list[dict], t: float, tol: float) -> int:
+    """Which syllable a chord at time `t` belongs to: the last one that starts no
+    later than t + tol (the same rule that puts a chord on a word)."""
+    idx = 0
+    for k, sp in enumerate(spans):
+        if sp["start"] <= t + tol:
+            idx = k
+    return idx
 
 
 def build_rows(lines: list[dict], chords: list[dict], beat_period: float = 0.5,
                grid: BarGrid | None = None, bars_per_row: int = 4,
-               chords_per_row: int = 8) -> list[dict]:
+               chords_per_row: int = 8, syllabify=None) -> list[dict]:
     """Interleave lyric rows and instrumental rows in time order.
 
     A chord lands on the last word that starts no later than (chord start + tol).
     A chord change shortly before a line (within ~1 beat) lands on its first
     word. Anything else between lines becomes an instrumental row.
+
+    `syllabify(word) -> [{"text", "start", "end", "c"}]` splits a word that carries
+    a chord into syllables: such a word gets "syl" (the spans) and "at" (chord id
+    -> index of the syllable it sits over), so a change in the middle of a held
+    word shows over the right syllable. Words of one syllable get neither.
 
     With a bar grid, instrumental rows are cut into bars (`bars_per_row` per row;
     each bar lists the changes inside it, and `hold` = the chord still sounding
@@ -130,14 +181,17 @@ def build_rows(lines: list[dict], chords: list[dict], beat_period: float = 0.5,
             return
         last = by_id[ids[-1]]
         end = last["end"] if until is None else min(last["end"], until)
-        k0 = grid.bar_of(by_id[ids[0]]["start"])
-        k1 = max(k0, grid.bar_of(max(end - 1e-3, by_id[ids[-1]]["start"])))
+        k0 = grid.chord_bar(by_id[ids[0]]["start"])
+        k1 = max(k0, grid.bar_of(max(end - 1e-3, by_id[ids[-1]]["start"])),
+                 grid.chord_bar(by_id[ids[-1]]["start"]))
         bars = []
         for bar in range(k0, k1 + 1):
-            inside = [cid for cid in ids if grid.bar_of(by_id[cid]["start"]) == bar]
+            inside = [cid for cid in ids if grid.chord_bar(by_id[cid]["start"]) == bar]
             # the chord still sounding on the downbeat, unless a change lands on it
+            # (or arrives just ahead of it: a push)
             t0 = grid.bar_start(bar)
-            on_beat = inside and abs(by_id[inside[0]]["start"] - t0) <= 0.12
+            lead = t0 - by_id[inside[0]]["start"] if inside else 0.0
+            on_beat = inside and (abs(lead) <= 0.12 or 0 < lead <= 0.6 * grid.period)
             hold = None if on_beat else sounding_at(t0)
             bars.append({"bar": bar, "chords": inside, "hold": hold})
         for a in range(0, len(bars), bars_per_row):
@@ -155,6 +209,12 @@ def build_rows(lines: list[dict], chords: list[dict], beat_period: float = 0.5,
         for j, w in enumerate(ln["words"]):
             word = {"i": j, "text": w["text"], "start": w["start"], "end": w["end"],
                     "chords": on_word.get((i, j), [])}
+            if syllabify is not None and word["chords"]:
+                spans = syllabify(w)
+                if len(spans) > 1:
+                    word["syl"] = spans
+                    word["at"] = {cid: syllable_index(spans, by_id[cid]["start"], tol)
+                                  for cid in word["chords"]}
             if grid is not None:
                 nxt = ln["words"][j + 1]["start"] if j + 1 < len(ln["words"]) else w["end"] + tol
                 a, b = grid.bar_of(w["start"] - tol), grid.bar_of(nxt - tol)

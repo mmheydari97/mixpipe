@@ -1,5 +1,5 @@
-/* Shared by the song tools (chord finder, splitter): tokens, layout, cards,
-   the add-a-song box, progress and the song list. */
+/* Shared by the web apps (chord finder, splitter, mixer): tokens, layout, cards,
+   the add-a-song box, progress, the song list and the model picker. */
 
 :root {
   --bg: #f6f5f2;
@@ -145,3 +145,18 @@ textarea { font-family: var(--mono); font-size: 14px; line-height: 1.6; resize: 
 button.link { background: transparent; border: 0; color: var(--accent); padding: 3px 4px; font-size: .9em; }
 button.link:hover { text-decoration: underline; }
 kbd { font-family: var(--mono); font-size: .85em; padding: 0 5px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; background: var(--surface); }
+
+/* ---------- model picker ---------- */
+.picker { position: relative; }
+.picker-list {
+  position: absolute; z-index: 40; left: 0; right: 0; top: calc(100% + 4px); max-height: 320px; overflow: auto;
+  list-style: none; margin: 0; padding: 4px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.picker-list li { padding: 6px 8px; border-radius: 6px; cursor: pointer; display: grid; gap: 2px; }
+.picker-list li.hl, .picker-list li:hover { background: var(--accent-soft); }
+.picker-list li.hint { cursor: default; color: var(--warn); background: transparent; font-size: .85em; }
+.picker-list .row1 { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.picker-list .id { font-family: var(--mono); font-size: .78em; color: var(--muted); }
+.picker-selected { font-size: .85em; color: var(--muted); margin-top: 4px; }
+.picker-selected b { font-family: var(--mono); color: var(--text); }

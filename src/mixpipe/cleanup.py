@@ -1,4 +1,4 @@
-"""Per-stem cleanup: DC offset, noise reduction, gating, edge fades.
+"""Per-stem cleanup: DC offset, mains hum, noise reduction, clicks, gating, edge fades.
 
 Runs before EQ and compression, because compressing a noisy take just makes the
 noise louder in the gaps.
@@ -7,9 +7,11 @@ noise louder in the gaps.
 from __future__ import annotations
 
 import numpy as np
-from scipy.signal import stft, istft
+from scipy.interpolate import CubicSpline
+from scipy.signal import iirnotch, sosfilt, stft, istft, tf2sos, welch
 
 from . import SAMPLE_RATE
+from ._fast import asym_smooth
 from .analysis import from_db
 from .io_utils import Stem
 
@@ -63,6 +65,9 @@ def _spectral_gate(
     return cleaned[: mono.size].astype(np.float32)
 
 
+NOISE_PROFILE_MARGIN_DB = 20.0   # a noise sample must be this far under the music
+
+
 def denoise(
     audio: np.ndarray,
     sr: int = SAMPLE_RATE,
@@ -71,27 +76,32 @@ def denoise(
 ) -> np.ndarray:
     """Reduce steady-state noise (room hum, amp hiss, phone-mic floor).
 
-    The noise profile is taken from the first `noise_profile_ms`, so leave a
-    little silence at the top of every take. If there is no usable silence, this
-    falls back to noisereduce's non-stationary mode, or returns audio unchanged.
+    The noise profile is the quietest `noise_profile_ms` of the take (a pause, or
+    the silence before the first note). It is only trusted when it sits at least
+    NOISE_PROFILE_MARGIN_DB under the take's loud level: a stem with no pause at all
+    (a mid-song excerpt, a separated stem that never stops) has no noise sample,
+    and subtracting the music from itself would take several dB off everything.
+    Such a take is returned unchanged.
     """
     if strength <= 0.0:
         return audio
 
     def _one(ch: np.ndarray) -> np.ndarray:
         n_profile = int(noise_profile_ms / 1000.0 * sr)
-        profile = ch[:n_profile] if ch.size > n_profile * 2 else None
+        if ch.size <= n_profile * 2:
+            return ch
+        profile = _quietest_segment(ch, sr, noise_profile_ms / 1000.0)
+        hop = max(1, int(0.05 * sr))
+        frames = ch[: ch.size // hop * hop].astype(np.float64).reshape(-1, hop)
+        loud = np.percentile(np.sqrt(np.mean(frames ** 2, axis=1)), 95)
+        quiet = np.sqrt(np.mean(profile.astype(np.float64) ** 2))
+        if quiet <= 1e-7 or loud <= 0 or 20 * np.log10(loud / quiet) < NOISE_PROFILE_MARGIN_DB:
+            return ch                     # digital silence (nothing to remove) or no pause
 
         if HAVE_NOISEREDUCE:
-            kwargs = {"y": ch, "sr": sr, "prop_decrease": float(strength)}
-            if profile is not None and np.max(np.abs(profile)) > 1e-6:
-                kwargs["y_noise"] = profile
-            else:
-                kwargs["stationary"] = False
-            return noisereduce.reduce_noise(**kwargs).astype(np.float32)
-
-        if profile is None:
-            return ch
+            return noisereduce.reduce_noise(
+                y=ch, sr=sr, prop_decrease=float(strength), y_noise=profile
+            ).astype(np.float32)
         return _spectral_gate(ch, sr, profile, strength)
 
     if audio.ndim == 1:
@@ -124,16 +134,9 @@ def noise_gate(
             : open_mask.size
         ] > 0
 
-    gain = open_mask.astype(np.float32)
-    a_coef = np.exp(-1.0 / max(1.0, attack_ms / 1000.0 * sr))
-    r_coef = np.exp(-1.0 / max(1.0, release_ms / 1000.0 * sr))
-
-    smoothed = np.empty_like(gain)
-    g = 0.0
-    for i, target in enumerate(gain):
-        coef = a_coef if target > g else r_coef
-        g = target + coef * (g - target)
-        smoothed[i] = g
+    smoothed = asym_smooth(
+        open_mask.astype(np.float64), up_ms=attack_ms, down_ms=release_ms, sr=sr, init=0.0
+    ).astype(np.float32)
 
     if audio.ndim == 1:
         return audio * smoothed
@@ -185,6 +188,14 @@ def clean_stem(stem: Stem, cfg: dict) -> Stem:
 
     if c.get("remove_dc", True):
         audio = remove_dc(audio)
+    if c.get("dehum", "auto"):
+        audio = dehum(audio, stem.sr, base_hz=c.get("dehum", "auto"))
+    if c.get("declick", False):
+        audio = declick(
+            audio, stem.sr,
+            threshold=c.get("declick_threshold", 8.0),
+            max_click_ms=c.get("declick_max_ms", 2.0),
+        )
     if c.get("denoise", True):
         audio = denoise(
             audio,
@@ -207,23 +218,202 @@ def clean_stem(stem: Stem, cfg: dict) -> Stem:
     return out
 
 
-def declick(audio: np.ndarray, sr: int = SAMPLE_RATE) -> np.ndarray:
+# --------------------------------------------------------------------------- #
+# click removal
+# --------------------------------------------------------------------------- #
+
+
+def _robust_scale(d: np.ndarray, block: int) -> np.ndarray:
+    """Per-sample robust scale of `d`: the largest block median of |d| nearby.
+
+    A block median ignores a click (a few outliers). Taking the max over the
+    neighbouring blocks as well keeps an attack that starts at a block edge, with
+    a loud block next to a quiet one, from looking like an outlier in the quiet one.
+    """
+    n_blocks = int(np.ceil(d.size / block))
+    padded = np.pad(np.abs(d), (0, n_blocks * block - d.size), mode="edge")
+    med = np.median(padded.reshape(n_blocks, block), axis=1) * 1.4826
+    near = np.maximum(med, np.maximum(np.r_[med[1:], med[-1:]], np.r_[med[:1], med[:-1]]))
+    return np.repeat(near, block)[: d.size]
+
+
+def find_clicks(
+    mono: np.ndarray, sr: int = SAMPLE_RATE, threshold: float = 8.0,
+    max_click_ms: float = 2.0, min_level_db: float = -55.0,
+) -> list[tuple[int, int]]:
+    """Locate impulsive clicks as (start, stop) sample runs, stop exclusive.
+
+    The detector works on the second difference, which turns a click (a short
+    jump away from and back to the waveform) into a large isolated spike while
+    cancelling most of the music. A sample is an outlier when it exceeds
+    `threshold` x the robust local scale and `min_level_db`. Runs longer than
+    `max_click_ms` are dropped: a pick attack or drum hit keeps the second
+    difference large for much longer than a click does, and the neighbouring
+    blocks' scale rises with it.
+    """
+    x = np.asarray(mono, dtype=np.float64)
+    if x.size < 16:
+        return []
+    d = np.diff(x, n=2)                     # d[i] is centred on x[i + 1]
+    scale = _robust_scale(d, max(32, int(0.005 * sr)))
+    floor = float(from_db(min_level_db))
+    flagged = (np.abs(d) > threshold * np.maximum(scale, 1e-9)) & (np.abs(d) > floor)
+    if not flagged.any():
+        return []
+
+    # Group flagged samples into runs, merging gaps of up to 2 samples, then pad
+    # by 2 on each side because the second difference spreads a click over three.
+    idx = np.nonzero(flagged)[0] + 1        # back to x coordinates
+    breaks = np.nonzero(np.diff(idx) > 3)[0]
+    starts = np.r_[idx[0], idx[breaks + 1]]
+    stops = np.r_[idx[breaks], idx[-1]] + 1
+    max_len = max(4, int(max_click_ms / 1000.0 * sr))
+    runs = []
+    for a, b in zip(starts, stops):
+        a, b = max(1, a - 2), min(x.size - 1, b + 2)
+        if b - a <= max_len:
+            runs.append((int(a), int(b)))
+    return runs
+
+
+def _repair(x: np.ndarray, a: int, b: int, context: int = 6) -> None:
+    """Replace x[a:b] in place with a cubic spline through the samples around it."""
+    lo, hi = max(0, a - context), min(x.size, b + context)
+    xs = np.r_[np.arange(lo, a), np.arange(b, hi)]
+    if xs.size < 4:
+        return
+    x[a:b] = CubicSpline(xs, x[xs], bc_type="natural")(np.arange(a, b))
+
+
+def declick(
+    audio: np.ndarray, sr: int = SAMPLE_RATE, threshold: float = 8.0,
+    max_click_ms: float = 2.0, min_level_db: float = -55.0,
+) -> np.ndarray:
     """Detect and interpolate over impulsive clicks and pops.
 
-    # TODO: needs median-filter outlier detection on the sample-difference
-    # signal, then cubic interpolation across flagged runs. Non-trivial to tune
-    # without false-positive-ing on legitimate pick attacks and drum transients.
+    Median-based outlier detection on the second difference (`find_clicks`),
+    then cubic interpolation across each flagged run. Each channel is treated
+    on its own. Conservative by design: it only touches runs shorter than
+    `max_click_ms`, so pick attacks and drum transients (which are wider and lift
+    the local scale) are left alone. Lower `threshold` to catch quieter clicks
+    at the cost of more false positives.
     """
-    pass  # TODO
-    return audio
+    if audio.size == 0:
+        return audio
+
+    def _one(ch: np.ndarray) -> np.ndarray:
+        runs = find_clicks(ch, sr, threshold, max_click_ms, min_level_db)
+        if not runs:
+            return ch
+        out = ch.astype(np.float64)
+        for a, b in runs:
+            _repair(out, a, b)
+        return out.astype(np.float32)
+
+    if audio.ndim == 1:
+        return _one(audio)
+    return np.stack([_one(audio[:, c]) for c in range(audio.shape[1])], axis=1)
 
 
-def dehum(audio: np.ndarray, sr: int = SAMPLE_RATE, base_hz: float = 60.0) -> np.ndarray:
+# --------------------------------------------------------------------------- #
+# mains hum
+# --------------------------------------------------------------------------- #
+
+_MAINS = (50.0, 60.0)
+_HUM_MAX_HARMONICS = 10
+_HUM_PROMINENCE_DB = 10.0     # a line must stand this far above its surroundings
+_HUM_MIN_LINES = 2            # ... and at least this many harmonics (two of them in 1-4)
+
+
+def _quietest_segment(mono: np.ndarray, sr: int, seconds: float = 2.0) -> np.ndarray:
+    """The quietest `seconds` of the signal, where hum is not masked by music."""
+    n = int(seconds * sr)
+    if mono.size <= n:
+        return mono
+    hop = int(0.1 * sr)
+    n_frames = mono.size // hop
+    power = np.mean(mono[: n_frames * hop].astype(np.float64).reshape(n_frames, hop) ** 2, axis=1)
+    k = max(1, int(round(seconds / 0.1)))
+    window = np.convolve(power, np.ones(k), mode="valid")
+    start = int(np.argmin(window)) * hop
+    return mono[start : start + n]
+
+
+def find_hum(
+    audio: np.ndarray, sr: int = SAMPLE_RATE, max_search_hz: float = 1000.0
+) -> dict | None:
+    """Detect mains hum and say which family it is.
+
+    Looks at the quietest couple of seconds, and for each of 50 Hz and 60 Hz
+    measures how far every harmonic line stands above the surrounding spectrum.
+    Returns None unless at least two harmonics of one family clearly stand out,
+    otherwise {"base_hz", "harmonics": [k, ...], "prominence_db": [...]}.
+    """
+    mono = audio if audio.ndim == 1 else audio.mean(axis=1)
+    seg = _quietest_segment(mono.astype(np.float64), sr)
+    if seg.size < sr // 2 or float(np.max(np.abs(seg))) < 1e-7:
+        return None
+
+    nper = min(seg.size, 1 << 16)
+    freqs, psd = welch(seg, fs=sr, nperseg=nper, noverlap=nper // 2)
+    df = freqs[1] - freqs[0]
+    best, best_score = None, 0.0
+    for base in _MAINS:
+        harmonics, prom = [], []
+        for k in range(1, _HUM_MAX_HARMONICS + 1):
+            f0 = base * k
+            if f0 > max_search_hz or f0 > sr * 0.45:
+                break
+            line = (freqs > f0 - 0.6) & (freqs < f0 + 0.6)
+            around = (np.abs(freqs - f0) > 3.0) & (np.abs(freqs - f0) < 25.0)
+            if not line.any() or around.sum() < 4:
+                continue
+            ratio_db = 10.0 * np.log10(max(psd[line].max(), 1e-30) / max(np.median(psd[around]), 1e-30))
+            if ratio_db >= _HUM_PROMINENCE_DB:
+                harmonics.append(k)
+                prom.append(round(float(ratio_db), 1))
+        # mains hum is strongest in its low harmonics; a lone note plus a chance
+        # spike far up the series is not hum, so two of the lines must be in 1-4
+        low = sum(1 for k in harmonics if k <= 4)
+        if len(harmonics) >= _HUM_MIN_LINES and low >= _HUM_MIN_LINES and sum(prom) > best_score:
+            best_score = sum(prom)
+            best = {"base_hz": base, "harmonics": harmonics, "prominence_db": prom}
+    return best
+
+
+def dehum(
+    audio: np.ndarray, sr: int = SAMPLE_RATE, base_hz: float | str | None = "auto",
+    harmonics: list[int] | None = None, q: float = 40.0,
+) -> np.ndarray:
     """Notch out mains hum and its harmonics.
 
-    # TODO: implement as a cascade of narrow notch filters at base_hz * n,
-    # with the fundamental frequency estimated from the noise profile rather
-    # than assumed (50 Hz vs 60 Hz depends on where you are).
+    `base_hz="auto"` (default) measures the hum (`find_hum`): it picks 50 or 60
+    Hz from the spectrum of the quietest part of the take, notches that
+    fundamental and its harmonics up to the 6th (or the highest it saw), and
+    returns the audio untouched when there is no hum. Pass 50.0 or 60.0 to skip detection and notch `harmonics` (default 1-8)
+    unconditionally. `q` sets the notch width: 40 is about 1.5 Hz wide at 60 Hz,
+    narrow enough to leave bass notes alone.
     """
-    pass  # TODO
-    return audio
+    if audio.size == 0 or base_hz is None or base_hz is False:
+        return audio
+    if base_hz == "auto":
+        found = find_hum(audio, sr)
+        if found is None:
+            return audio
+        # Complete the series: a harmonic can be masked by music in the analysed
+        # stretch yet still be in the take, and a notch ~1.5 Hz wide costs nothing.
+        base_hz = found["base_hz"]
+        harmonics = list(range(1, max(6, max(found["harmonics"])) + 1))
+    elif harmonics is None:
+        harmonics = list(range(1, 9))
+
+    sos = []
+    for k in harmonics:
+        f0 = float(base_hz) * k
+        if f0 >= sr * 0.45:
+            continue
+        b, a = iirnotch(f0, max(q, 1.0), fs=sr)
+        sos.append(tf2sos(b, a))
+    if not sos:
+        return audio
+    return sosfilt(np.vstack(sos), audio, axis=0).astype(np.float32)

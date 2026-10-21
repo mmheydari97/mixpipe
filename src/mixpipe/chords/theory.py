@@ -96,11 +96,14 @@ def key_short(key: str | None, shift: int = 0) -> str | None:
 
 
 # --------------------------------------------------------------------------- #
-# capo
+# instruments, capo
 # --------------------------------------------------------------------------- #
 
-# Open-position guitar shapes, as (root pc, quality). Slash bass is ignored.
-EASY_SHAPES = {
+# Open-position shapes, as (root pc, quality). Slash bass is ignored. "Easy"
+# shapes are played open; "medium" ones need a barre or a stretch and count half.
+# A shape is named by what it is *fingered as*: on a ukulele in C tuning the
+# "C" shape is open 0003.
+EASY_SHAPES = {   # guitar, standard tuning
     (0, ""), (2, ""), (4, ""), (7, ""), (9, ""),                  # C D E G A
     (9, "m"), (4, "m"), (2, "m"),                                 # Am Em Dm
     (9, "7"), (11, "7"), (0, "7"), (2, "7"), (4, "7"), (7, "7"),  # A7 B7 C7 D7 E7 G7
@@ -109,46 +112,102 @@ EASY_SHAPES = {
     (9, "sus2"), (9, "sus4"), (2, "sus2"), (2, "sus4"), (4, "sus4"),
     (0, "add9"), (7, "6"), (0, "6"), (9, "6"), (4, "6"),
 }
-# Shapes most players manage but that need a barre or a stretch: half credit.
 MEDIUM_SHAPES = {
     (5, ""), (5, "sus2"), (11, "m"), (11, "m7"), (6, "m"), (6, "m7"), (5, "7"),
 }
+# Ukulele, GCEA (soprano / concert / tenor): C Am F G G7 C7 Dm A A7 Am7 are all within
+# the first three frets; D, E and the minors on E and B need a stretch or a barre.
+EASY_UKE = {
+    (0, ""), (9, "m"), (5, ""), (7, ""), (7, "7"), (0, "7"), (2, "m"), (9, ""), (9, "7"),
+    (9, "m7"), (2, "m7"), (0, "maj7"), (5, "maj7"), (0, "6"), (5, "sus2"), (9, "sus4"),
+    (4, "m7"), (2, "7"),
+}
+MEDIUM_UKE = {
+    (2, ""), (4, "m"), (4, ""), (4, "7"), (10, ""), (7, "m"), (11, "m"), (5, "7"), (5, "m"),
+    (7, "maj7"), (2, "maj7"), (11, ""), (9, "maj7"), (7, "sus4"), (0, "sus2"), (2, "sus4"),
+}
+# Baritone ukulele, DGBE: the top four strings of a guitar, so the open shapes that
+# need only those strings; anything with a root on the missing low strings is a barre.
+EASY_BARITONE = {
+    (7, ""), (0, ""), (2, ""), (4, "m"), (9, "m"), (2, "m"), (9, ""), (4, ""), (4, "7"),
+    (7, "7"), (2, "7"), (9, "7"), (0, "maj7"), (7, "maj7"), (4, "m7"), (9, "m7"), (2, "m7"),
+    (2, "sus2"), (2, "sus4"), (7, "sus4"), (0, "7"), (2, "maj7"), (9, "sus2"),
+}
+MEDIUM_BARITONE = {(5, ""), (11, "m"), (11, "7"), (5, "maj7"), (4, "sus4"), (0, "add9"), (7, "6")}
+
+# id -> profile. `tuning` is how many semitones the instrument sounds above the
+# shapes' own names: a ukulele in D tuning (A D F# B) fingers C shapes that sound D.
+INSTRUMENTS: dict[str, dict] = {
+    "guitar": {"label": "Guitar", "easy": EASY_SHAPES, "medium": MEDIUM_SHAPES,
+               "tuning": 0, "max_capo": 7},
+    "guitar_half_down": {"label": "Guitar, half step down (E♭)", "easy": EASY_SHAPES,
+                         "medium": MEDIUM_SHAPES, "tuning": -1, "max_capo": 7},
+    "guitar_whole_down": {"label": "Guitar, whole step down (D)", "easy": EASY_SHAPES,
+                          "medium": MEDIUM_SHAPES, "tuning": -2, "max_capo": 7},
+    "ukulele": {"label": "Ukulele (GCEA)", "easy": EASY_UKE, "medium": MEDIUM_UKE,
+                "tuning": 0, "max_capo": 7},
+    "ukulele_d": {"label": "Ukulele, D tuning (ADF♯B)", "easy": EASY_UKE, "medium": MEDIUM_UKE,
+                  "tuning": 2, "max_capo": 7},
+    "baritone_ukulele": {"label": "Baritone ukulele (DGBE)", "easy": EASY_BARITONE,
+                         "medium": MEDIUM_BARITONE, "tuning": 0, "max_capo": 7},
+}
+DEFAULT_INSTRUMENT = "guitar"
 CAPO_FRET_COST = 0.015   # per fret: prefer lower capos when shapes are equal
 MIN_CAPO_GAIN = 0.15     # only suggest a capo that clearly beats the current one
 
 
-def _easy_fraction(chords: list[tuple[int, str, float]], shift: int) -> float:
+def instrument_profile(instrument: str | None) -> dict:
+    """The profile for an instrument id (the guitar for anything unknown)."""
+    return INSTRUMENTS.get(instrument or DEFAULT_INSTRUMENT, INSTRUMENTS[DEFAULT_INSTRUMENT])
+
+
+def instrument_choices() -> list[dict]:
+    return [{"id": k, "label": v["label"], "tuning": v["tuning"]} for k, v in INSTRUMENTS.items()]
+
+
+def _easy_fraction(chords: list[tuple[int, str, float]], shift: int,
+                   instrument: str | None = None) -> float:
+    prof = instrument_profile(instrument)
     total = sum(d for _, _, d in chords)
     if total <= 0:
         return 0.0
     score = 0.0
     for r, q, d in chords:
         shape = ((r + shift) % 12, q)
-        score += d if shape in EASY_SHAPES else 0.5 * d if shape in MEDIUM_SHAPES else 0.0
+        score += d if shape in prof["easy"] else 0.5 * d if shape in prof["medium"] else 0.0
     return score / total
 
 
 def suggest_capo(chords: list[tuple[int, str, float]], transpose: int = 0,
-                 current_capo: int = 0, max_capo: int = 7) -> dict | None:
+                 current_capo: int = 0, max_capo: int | None = None,
+                 instrument: str | None = None) -> dict | None:
     """The capo fret that puts the most playing time on open shapes, or None
     when nothing clearly beats the current capo.
 
     `chords` is [(sounding root pc, quality, duration_s)]. Shapes are the
-    sounding chord moved by (transpose - capo). Open shapes count fully, barre
-    shapes like F and Bm half; each fret costs a little so lower capos win ties.
+    sounding chord moved by (transpose - capo - the instrument's tuning offset).
+    Open shapes count fully, barre shapes like F and Bm half; each fret costs a
+    little so lower capos win ties. `instrument` picks the shape tables (guitar,
+    ukulele...).
     """
     if not chords:
         return None
-    current = _easy_fraction(chords, transpose - current_capo) - CAPO_FRET_COST * current_capo
+    prof = instrument_profile(instrument)
+    tuning = prof["tuning"]
+    top = prof["max_capo"] if max_capo is None else max_capo
+    frac = lambda capo: _easy_fraction(chords, transpose - capo - tuning, instrument)  # noqa: E731
+    current = frac(current_capo) - CAPO_FRET_COST * current_capo
     best_capo, best = current_capo, current
-    for capo in range(max_capo + 1):
-        score = _easy_fraction(chords, transpose - capo) - CAPO_FRET_COST * capo
+    for capo in range(top + 1):
+        score = frac(capo) - CAPO_FRET_COST * capo
         if score > best + 1e-9:
             best_capo, best = capo, score
     if best_capo == current_capo or best - current < MIN_CAPO_GAIN:
         return None
-    return {"capo": best_capo, "easy": round(_easy_fraction(chords, transpose - best_capo), 3)}
+    return {"capo": best_capo, "easy": round(frac(best_capo), 3)}
 
 
-def easy_fraction(chords: list[tuple[int, str, float]], transpose: int, capo: int) -> float:
-    return round(_easy_fraction(chords, transpose - capo), 3)
+def easy_fraction(chords: list[tuple[int, str, float]], transpose: int, capo: int,
+                  instrument: str | None = None) -> float:
+    tuning = instrument_profile(instrument)["tuning"]
+    return round(_easy_fraction(chords, transpose - capo - tuning, instrument), 3)

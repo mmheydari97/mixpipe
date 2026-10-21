@@ -55,13 +55,14 @@ finder (`make chords-ui`, port 8765) can run at the same time.
 | `--host` | `127.0.0.1` | keep it local; `0.0.0.0` exposes it to your network |
 | `--out` | `out/splitter` | where songs are stored |
 | `--no-browser` | off | don't open a browser tab |
+| `--workers` | `1` | songs split at once (more needs the memory for it) |
 
 ### Using the page
 
 **Add a song:** drop **one** audio file (the full song) or paste a link
 (YouTube, SoundCloud, Spotify, Bandcamp, a direct `.mp3` link, …; same rules as
 the [chord finder](../chords/README.md#using-the-page)), then press **Split**.
-Stages: (Download →) Decode → Separate. A 3.5-minute song took about 20 s on an
+Stages: (Download →) Decode → Separate. A queued or running split can be **cancelled** from its progress panel (it stops at the next progress report), and the queue shows how many jobs are ahead. A 3.5-minute song took about 20 s on an
 M4 Pro, download included.
 
 **The mixer:**

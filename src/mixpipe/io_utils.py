@@ -179,6 +179,22 @@ def normalize_shape(audio: np.ndarray, force_mono: bool = False) -> np.ndarray:
     return audio
 
 
+def is_dual_mono(audio: np.ndarray, tol_db: float = -40.0) -> bool:
+    """True for a 2-channel signal whose sides are (nearly) the same: a mono
+    recording saved as stereo. Its difference is `tol_db` or more under its sum."""
+    if audio.ndim != 2 or audio.shape[1] != 2:
+        return False
+    a = audio.astype(np.float64)
+    mid = np.mean((a[:, 0] + a[:, 1]) ** 2)
+    side = np.mean((a[:, 0] - a[:, 1]) ** 2)
+    return mid > 0 and side <= mid * 10 ** (tol_db / 10)
+
+
+def stems_mono(cfg: dict) -> bool:
+    """Whether a config wants every stem folded to mono."""
+    return not cfg.get("mixdown", {}).get("keep_stereo", True)
+
+
 def infer_role(filename: str, role_table: dict[str, str] | None = None) -> str:
     """Guess the instrument role from the filename.
 
@@ -199,8 +215,13 @@ def load_stems(
     directory: str | os.PathLike,
     force_mono: bool = True,
     role_table: dict[str, str] | None = None,
+    start_s: float = 0.0,
+    duration_s: float | None = None,
 ) -> list[Stem]:
-    """Load every audio file in a directory as a Stem, normalized and resampled."""
+    """Load every audio file in a directory as a Stem, normalized and resampled.
+
+    `start_s` / `duration_s` keep only an excerpt, so a 4-minute song can be
+    iterated on in short slices."""
     directory = Path(directory)
     if not directory.is_dir():
         raise FileNotFoundError(f"stem directory not found: {directory}")
@@ -218,7 +239,15 @@ def load_stems(
     for p in paths:
         audio, sr = read_audio(p)
         audio = normalize_shape(audio, force_mono=force_mono)
+        if is_dual_mono(audio):           # pan should work on it like on any mono take
+            audio = audio.mean(axis=1)
         audio = to_sample_rate(audio, sr, SAMPLE_RATE)
+        if start_s > 0 or duration_s is not None:
+            a = int(max(0.0, start_s) * SAMPLE_RATE)
+            b = audio.shape[0] if duration_s is None else a + int(duration_s * SAMPLE_RATE)
+            audio = audio[a:b]
+            if audio.shape[0] == 0:
+                raise ValueError(f"excerpt start {start_s}s is past the end of {p.name}")
         stems.append(
             Stem(
                 name=p.stem,

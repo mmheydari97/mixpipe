@@ -29,11 +29,13 @@ from .. import songstore
 from ..songstore import (Progress, _write_json, download_inputs, get_status, list_songs,
                          new_song, new_song_from_url, set_status)
 from .ingest import WORK_SR, Ingested, ingest
+from .retime import retime
 from .sheet import SHEET_VERSION, load_sheet, save_sheet
+from .syllables import ENV_HOP, loudness_envelope
 
 DEFAULT_ROOT = Path("out/chords")
-RECOGNIZER_VERSION = 4
-MELODY_VERSION = 1
+RECOGNIZER_VERSION = 5
+MELODY_VERSION = 2
 STAGES = ("download", "decode", "separate", "transcribe", "chords", "melody", "align")
 BROWSER_PLAYABLE = {".mp3", ".m4a", ".aac", ".mp4", ".wav", ".flac", ".ogg", ".opus", ".webm"}
 
@@ -42,6 +44,9 @@ DEFAULT_OPTIONS = {
     "stt": "mlx",         # "mlx" | "openrouter"
     "stt_model": None,    # OpenRouter model id when stt == "openrouter"
     "separate": True,     # run Demucs on a single full-mix upload
+    "retime": True,       # fix estimated word times (OpenRouter text) with a local pass
+    "key_changes": "normal",  # "normal" (~8+ bar modulations) | "sensitive" (3-4 bars)
+    "recognizer": "template",  # "template" | "neural" (adds the BTC model's opinion)
 }
 
 # --------------------------------------------------------------------------- #
@@ -110,6 +115,8 @@ def analyze(
     root: Path | None = None,
     downloader: Callable | None = None,
     melody_extractor: Callable | None = None,
+    retimer: Callable | None = None,
+    neural_provider: Callable | None = None,
 ) -> dict:
     """Run every stage for one song and write sheet.json. Returns the sheet.
 
@@ -117,6 +124,8 @@ def analyze(
     `transcriber(vocal, sr, backend=, model=, language=) -> transcript`,
     `downloader(source, dest_dir, progress=cb) -> Path` and
     `melody_extractor(vocal, sr, regions, fallback=, key=, progress=) -> {"notes"}`
+    `retimer(transcript, vocal, sr) -> transcript` and
+    `neural_provider(mix, sr, progress) -> {"probs", "frame_s"}`
     can be injected (tests use fakes so no models or songs are downloaded).
     """
     from .recognize import recognize
@@ -150,7 +159,7 @@ def analyze(
             report("transcribe", 1.0, "no vocals found")
         else:
             cache_key = {"stt": opts["stt"], "stt_model": opts["stt_model"],
-                         "language": opts["language"]}
+                         "language": opts["language"], "retime": bool(opts["retime"])}
             cache = song_dir / "transcript.json"
             cached = json.loads(cache.read_text()) if cache.exists() else None
             if cached and cached.get("cache_key") == cache_key:
@@ -163,10 +172,14 @@ def analyze(
                 fn = transcriber or transcribe
                 transcript = fn(vocal, ing.sr, backend=opts["stt"], model=opts["stt_model"],
                                 language=opts["language"])
+                native_timing = transcript["timing"]       # what the model itself returned
+                if native_timing == "approx" and opts["retime"] and transcript["lines"]:
+                    report("transcribe", 0.85, "fixing the estimated word times locally")
+                    transcript = (retimer or retime)(transcript, vocal, ing.sr)
                 transcript["cache_key"] = cache_key
                 _write_json(cache, transcript)
                 if transcript["backend"] == "openrouter" and transcript["lines"]:
-                    _record_cap(root, transcript["model"], transcript["timing"])
+                    _record_cap(root, transcript["model"], native_timing)
                 report("transcribe", 1.0, f"{sum(len(ln) for ln in transcript['lines'])} words")
     else:
         report("transcribe", 1.0, "skipped (instrumental)")
@@ -174,13 +187,32 @@ def analyze(
     # ---- chords ---------------------------------------------------------------
     chords_path = song_dir / "chords.json"
     cached = json.loads(chords_path.read_text()) if chords_path.exists() else None
-    if cached and cached.get("version") == RECOGNIZER_VERSION:
+    key_mode = opts["key_changes"] if opts["key_changes"] in ("normal", "sensitive") else "normal"
+    wanted = opts["recognizer"] if opts["recognizer"] in ("template", "neural") else "template"
+    if (cached and cached.get("version") == RECOGNIZER_VERSION
+            and cached.get("key_changes", "normal") == key_mode
+            and cached.get("recognizer_requested", "template") == wanted):
         chords = cached
         report("chords", 1.0, "using cached chords")
     else:
+        neural, used = None, "template"
+        if wanted == "neural":
+            from .btc import ModelUnavailable
+
+            try:
+                report("chords", 0.05, "asking the neural chord model")
+                neural = (neural_provider or _btc_probs)(
+                    ing.mix, ing.sr, lambda msg: report("chords", 0.05, msg))
+                used = "btc"
+            except ModelUnavailable as exc:
+                report("chords", 0.05, f"neural chord model unavailable ({exc}); "
+                                       "using the standard recognizer")
         report("chords", 0.1, "detecting beats and chords")
-        chords = recognize(harmony, ing.sr, bass=bass)
+        chords = recognize(harmony, ing.sr, bass=bass, key_sensitivity=key_mode, neural=neural)
         chords["version"] = RECOGNIZER_VERSION
+        chords["key_changes"] = key_mode
+        chords["recognizer_requested"] = wanted
+        chords["recognizer"] = used
         _write_json(chords_path, chords)
         report("chords", 1.0, f"{len(chords['segments'])} chord changes, key {chords['key_label']}")
 
@@ -206,19 +238,32 @@ def analyze(
         "beat_times": chords.get("beat_times", []),
         "meter": {**{k: chords["meter"][k]
                      for k in ("time_signature", "beats_per_bar", "downbeat")},
+                  "sections": list(chords["meter"].get("sections") or []),
                   "detected": dict(chords["meter"])},
         "transpose": 0,
         "capo": 0,
-        "transcript": {k: transcript.get(k) for k in ("backend", "model", "language", "timing")},
+        "recognizer": chords.get("recognizer", "template"),
+        "transcript": {k: transcript.get(k)
+                       for k in ("backend", "model", "language", "timing", "retimed")},
         "lines": [{"words": ln, "gap_before": False} for ln in transcript["lines"]],
         "chords": chords["segments"],
         "melody": {"notes": melody["notes"], "octave": 0},
     }
+    if transcript["lines"] and vocal is not None:
+        # lets the sheet put syllable boundaries (and so mid-word chords) where the
+        # voice dips, without keeping the audio around
+        sheet["vocal_env"] = {"hop": ENV_HOP, "v": loudness_envelope(vocal, ing.sr)}
     if source:
         sheet["source"] = {k: source.get(k) for k in ("url", "page_url", "site", "note")}
     save_sheet(sheet, song_dir / "sheet.json")
     report("align", 1.0, "done")
     return sheet
+
+
+def _btc_probs(mix: np.ndarray, sr: int, progress) -> dict:
+    from .btc import neural_probs
+
+    return neural_probs(mix if mix.ndim == 1 else mix.mean(axis=1), sr, progress)
 
 
 def _sources(song_dir: Path, ing: Ingested, separate: bool, separator, report):
@@ -257,14 +302,15 @@ def _lead(harmony, bass):
 
 
 def find_melody(song_dir: Path, vocal, lead, sr: int, key: str | None,
-                extractor: Callable | None, report, force: bool = False) -> dict:
+                extractor: Callable | None, report, force: bool = False,
+                fast: bool = False) -> dict:
     """Melody notes for the harmonica tab, cached in melody.json. `lead` (the
-    instruments) is used where nobody sings."""
+    instruments) is used where nobody sings. `fast` keeps grace notes."""
     from .transcribe import has_vocals, vocal_activity
 
     path = song_dir / "melody.json"
     cached = json.loads(path.read_text()) if path.exists() and not force else None
-    if cached and cached.get("version") == MELODY_VERSION:
+    if cached and cached.get("version") == MELODY_VERSION and bool(cached.get("fast")) == fast:
         report("melody", 1.0, "using cached melody")
         return cached
     report("melody", 0.05, "finding the melody")
@@ -273,9 +319,11 @@ def find_melody(song_dir: Path, vocal, lead, sr: int, key: str | None,
         regions = []
     if extractor is None:
         from .melody import extract_melody as extractor
+    kwargs = {"fast": True} if fast else {}       # injected test extractors may not take it
     melody = extractor(vocal if regions else None, sr, regions, fallback=lead, key=key,
-                       progress=lambda f, msg: report("melody", f, msg))
+                       progress=lambda f, msg: report("melody", f, msg), **kwargs)
     melody["version"] = MELODY_VERSION
+    melody["fast"] = fast
     _write_json(path, melody)
     report("melody", 1.0, f"{len(melody['notes'])} melody notes")
     return melody
@@ -288,17 +336,21 @@ def _write_stereo(path: Path, audio: np.ndarray, sr: int) -> None:
              subtype="PCM_16")
 
 
-def run_job(song_dir: Path, options: dict | None = None, **kwargs) -> dict | None:
-    """analyze() with status.json bookkeeping; never raises."""
+def run_job(song_dir: Path, options: dict | None = None, cancelled: Callable | None = None,
+            **kwargs) -> dict | None:
+    """analyze() with status.json bookkeeping; never raises. `cancelled()` stops the
+    job at its next progress report."""
     return songstore.run_job(
         song_dir, lambda progress: analyze(song_dir, options, progress=progress, **kwargs),
-        done_stage="align")
+        done_stage="align", cancelled=cancelled)
 
 
-def run_melody_job(song_dir: Path, lock=None, extractor: Callable | None = None) -> dict | None:
+def run_melody_job(song_dir: Path, lock=None, extractor: Callable | None = None,
+                   fast: bool = False, cancelled: Callable | None = None) -> dict | None:
     """(Re-)find the melody of an analysed song and store it in sheet.json
     without touching chord or lyric edits. Uses the cached Demucs stems when
-    the song was separated; never re-runs separation. Never raises."""
+    the song was separated; never re-runs separation. `fast` keeps grace notes
+    and quick runs. The harmonica chosen in the sheet is kept. Never raises."""
     import contextlib
 
     song_dir = Path(song_dir)
@@ -312,15 +364,18 @@ def run_melody_job(song_dir: Path, lock=None, extractor: Callable | None = None)
         harmony, vocal, bass = _sources(song_dir, ing, separated, None, lambda *a: None)
         key = load_sheet(song_dir / "sheet.json").get("key")
         melody = find_melody(song_dir, vocal, _lead(harmony, bass), ing.sr, key, extractor,
-                             report, force=True)
+                             report, force=True, fast=fast)
         with lock or contextlib.nullcontext():
             sheet = load_sheet(song_dir / "sheet.json")
-            octave = (sheet.get("melody") or {}).get("octave", 0)
-            sheet["melody"] = {"notes": melody["notes"], "octave": octave}
+            old = sheet.get("melody") or {}
+            sheet["melody"] = {"notes": melody["notes"], "octave": old.get("octave", 0),
+                               "fast": fast}
+            if old.get("instrument"):
+                sheet["melody"]["instrument"] = old["instrument"]
             save_sheet(sheet, song_dir / "sheet.json")
         return sheet
 
-    return songstore.run_job(song_dir, work, done_stage="melody")
+    return songstore.run_job(song_dir, work, done_stage="melody", cancelled=cancelled)
 
 
 __all__ = ["DEFAULT_ROOT", "STAGES", "analyze", "run_job", "run_melody_job", "new_song",

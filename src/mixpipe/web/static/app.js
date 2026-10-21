@@ -91,144 +91,6 @@ const synth = {
 };
 
 // =========================================================================
-// OpenRouter model picker (search bar; "free" puts free models first)
-// =========================================================================
-
-const modelCache = new Map();
-async function loadModels(kind) {
-  if (!modelCache.has(kind)) {
-    modelCache.set(kind, api(`/api/openrouter/models?kind=${kind}`).catch((e) => {
-      modelCache.delete(kind);
-      throw e;
-    }));
-  }
-  return modelCache.get(kind);
-}
-
-function rankModels(models, query) {
-  const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const wantFree = tokens.includes("free");
-  const terms = tokens.filter((t) => t !== "free");
-  const scored = [];
-  for (const m of models) {
-    const id = m.id.toLowerCase();
-    const name = (m.name || "").toLowerCase();
-    const desc = (m.description || "").toLowerCase();
-    const idTail = id.split("/").pop();
-    let score = 0;
-    let ok = true;
-    for (const t of terms) {
-      let s = 0;
-      if (idTail.startsWith(t) || id.startsWith(t)) s = 30;
-      else if (name.startsWith(t)) s = 25;
-      else if (id.includes(t)) s = 20;
-      else if (name.includes(t)) s = 15;
-      else if (desc.includes(t)) s = 4;
-      if (!s) { ok = false; break; }
-      score += s;
-    }
-    if (ok) scored.push({ m, score });
-  }
-  scored.sort((a, b) =>
-    (wantFree ? Number(b.m.is_free) - Number(a.m.is_free) : 0) ||
-    b.score - a.score ||
-    a.m.sort_price - b.m.sort_price ||
-    a.m.name.localeCompare(b.m.name));
-  return { list: scored.map((s) => s.m), wantFree };
-}
-
-function createModelPicker(container, kind, { placeholder, initialQuery = "", onChange } = {}) {
-  const storeKey = `mixpipe.model.${kind}`;
-  let selected = store.get(storeKey);
-  let results = [];
-  let hl = -1;
-
-  const input = el("input", { type: "search", placeholder, autocomplete: "off", spellcheck: "false",
-    "aria-autocomplete": "list", role: "combobox", "aria-expanded": "false" });
-  input.value = initialQuery;
-  const list = el("ul", { class: "picker-list", role: "listbox", hidden: true });
-  const chosen = el("div", { class: "picker-selected" });
-  container.replaceChildren(el("div", { class: "picker" }, input, list), chosen);
-
-  const showChosen = () => {
-    chosen.replaceChildren(selected ? el("span", {}, "Selected: ", el("b", {}, selected)) : "No model selected");
-  };
-  showChosen();
-
-  const badgeRow = (m) => {
-    const badges = [];
-    badges.push(m.is_free ? el("span", { class: "badge free" }, "FREE") : el("span", { class: "badge" }, m.price_label));
-    if (kind === "transcription") {
-      if (m.word_timing === "word") badges.push(el("span", { class: "badge ok" }, "word timing ✓"));
-      else if (m.word_timing === "approx") badges.push(el("span", { class: "badge" }, "word timing ~"));
-    } else {
-      if ((m.input_modalities || []).includes("audio")) badges.push(el("span", { class: "badge" }, "audio in"));
-      if (m.context_length) badges.push(el("span", { class: "badge" }, `${Math.round(m.context_length / 1000)}k ctx`));
-    }
-    return badges;
-  };
-
-  async function render() {
-    let models;
-    try {
-      models = await loadModels(kind);
-    } catch (e) {
-      list.replaceChildren(el("li", { class: "hint" }, `Couldn't load models: ${e.message}`));
-      list.hidden = false;
-      return;
-    }
-    const { list: ranked, wantFree } = rankModels(models, input.value);
-    results = ranked.slice(0, 60);
-    hl = results.length ? 0 : -1;
-    const items = [];
-    if (wantFree && kind === "transcription" && !models.some((m) => m.is_free)) {
-      items.push(el("li", { class: "hint" },
-        "No free transcription models on OpenRouter. Local Whisper is free; paid models are listed below."));
-    }
-    results.forEach((m, i) => {
-      items.push(el("li", {
-        role: "option", class: i === hl ? "hl" : "", dataset: { i },
-        onmousedown: (ev) => { ev.preventDefault(); choose(m); },
-      },
-      el("div", { class: "row1" }, el("b", {}, m.name), ...badgeRow(m)),
-      el("span", { class: "id" }, m.id)));
-    });
-    if (!results.length) items.push(el("li", { class: "hint" }, "No matching models."));
-    list.replaceChildren(...items);
-    list.hidden = false;
-    input.setAttribute("aria-expanded", "true");
-  }
-
-  function choose(m) {
-    selected = m.id;
-    store.set(storeKey, selected);
-    input.value = m.name;
-    close();
-    showChosen();
-    onChange?.(selected);
-  }
-  function close() { list.hidden = true; input.setAttribute("aria-expanded", "false"); }
-  function moveHl(d) {
-    if (!results.length) return;
-    hl = (hl + d + results.length) % results.length;
-    list.querySelectorAll("li[role=option]").forEach((li) => li.classList.toggle("hl", Number(li.dataset.i) === hl));
-    list.querySelector("li.hl")?.scrollIntoView({ block: "nearest" });
-  }
-
-  input.addEventListener("focus", render);
-  input.addEventListener("input", render);
-  input.addEventListener("blur", () => setTimeout(close, 120));
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "ArrowDown") { e.preventDefault(); moveHl(1); }
-    else if (e.key === "ArrowUp") { e.preventDefault(); moveHl(-1); }
-    else if (e.key === "Enter") { e.preventDefault(); if (results[hl]) choose(results[hl]); }
-    else if (e.key === "Escape") close();
-  });
-
-  return { get value() { return selected; } };
-}
-
-// =========================================================================
 // progress panel
 // =========================================================================
 
@@ -286,6 +148,8 @@ async function analyze(rerun = false) {
     stt,
     stt_model: stt === "openrouter" ? lib.sttPicker.value : null,
     separate: $("#separate").checked,
+    key_changes: $("#key-changes").value,
+    recognizer: $("#recognizer").value,
     rerun,
   });
 
@@ -384,6 +248,44 @@ function makeChip(id, { carry = false } = {}) {
   return chip;
 }
 
+// One lyric word with its chips. A word the server split into syllables (w.syl)
+// puts each chip over its own syllable; `mk(id)` makes a chip, `carry` is a
+// "still sounding" chip for the line's first word. Returns {node, timing}: the cell
+// to insert and the node that is highlighted while the word is sung.
+function lyricCell(w, src, mk, carry) {
+  const approx = src.approx ? " approx" : "";
+  const barCls = w.bar != null ? " barline" : "";
+  const barTitle = w.bar != null ? `Bar ${w.bar + 1}` : null;
+  if (!w.syl) {
+    const chips = w.chords.map(mk);
+    if (carry) chips.unshift(carry);
+    const word = el("span", { class: "word" + approx, title: fmtTime(w.start) }, w.text);
+    word.addEventListener("click", () => seekPlay(w.start));
+    return { node: el("span", { class: "cell" + barCls, title: barTitle }, el("span", { class: "chords" }, chips), word), timing: word };
+  }
+  const groups = w.syl.map(() => []);
+  w.chords.forEach((id) => groups[w.at[id] ?? 0].push(mk(id)));
+  if (carry) groups[0].unshift(carry);
+  const parts = w.syl.map((sp, k) => {
+    const end = k + 1 < w.syl.length ? w.syl[k + 1].c : undefined;
+    const part = el("span", { class: "word part" + approx, title: `${fmtTime(sp.start)} · syllable ${k + 1}` }, w.text.slice(sp.c, end));
+    part.addEventListener("click", () => seekPlay(sp.start));
+    return el("span", { class: "cell syl" + (k === 0 ? barCls : ""), title: k === 0 ? barTitle : null },
+      el("span", { class: "chords" }, groups[k]), part);
+  });
+  const group = el("span", { class: "wordgroup", title: fmtTime(w.start) }, parts);
+  return { node: group, timing: group };
+}
+
+// has the user changed the meter away from what was detected?
+function meterIsManual(song) {
+  const det = song.meter?.detected;
+  if (!det) return false;
+  return det.time_signature !== song.meter.time_signature ||
+    det.beats_per_bar !== song.meter.beats_per_bar || det.downbeat !== song.meter.downbeat ||
+    JSON.stringify(det.sections || []) !== JSON.stringify(song.meter.sections || []);
+}
+
 function renderSong() {
   const song = S.song;
   S.chords = new Map(song.chords.map((c) => [c.id, c]));
@@ -403,19 +305,26 @@ function renderSong() {
   }
   if (song.capo) meta.push(el("span", { class: "badge" }, `Capo ${song.capo} · ${disp.shape_key_label} shapes`));
   if (disp.time_signature && song.beat_times?.length) {
-    const det = song.meter?.detected;
-    const manual = det && (det.time_signature !== song.meter.time_signature ||
-      det.beats_per_bar !== song.meter.beats_per_bar || det.downbeat !== song.meter.downbeat);
+    const manual = meterIsManual(song);
     meta.push(el("span", { class: "badge" }, `${disp.time_signature}${manual ? " · manual" : " · detected"}`));
+    for (const mc of disp.meter_changes || []) {
+      meta.push(el("span", { class: "badge", title: `The meter changes to ${mc.time_signature} at bar ${mc.bar}. Setting a time signature by hand replaces the detected changes.` },
+        `${mc.time_signature} from bar ${mc.bar}`));
+    }
   }
   if (song.tempo) meta.push(el("span", { class: "badge" }, `${Math.round(song.tempo)} BPM`));
   meta.push(el("span", { class: "badge" }, `${S.timeline.length} chord changes`));
+  if (song.recognizer === "btc") {
+    meta.push(el("span", { class: "badge", title: "Chords found by the BTC neural model combined with the standard chroma templates." }, "neural chords"));
+  }
   if (t.backend && t.backend !== "none") {
     meta.push(el("span", { class: "badge" }, `lyrics: ${t.backend === "mlx" ? "local Whisper" : t.model}${t.language ? " · " + t.language : ""}`));
   } else {
     meta.push(el("span", { class: "badge" }, "instrumental"));
   }
   if (t.timing === "approx") meta.push(el("span", { class: "badge err", title: "This model didn't return word timestamps; positions are estimated." }, "word timing approximate"));
+  if (t.timing === "aligned") meta.push(el("span", { class: "badge", title: "The model returned no word timestamps; word times come from a local Whisper pass matched to its text." }, "word timing aligned locally"));
+  if (t.timing === "snapped") meta.push(el("span", { class: "badge", title: "The model returned no word timestamps; word starts were moved onto the nearest sung onsets in the vocal." }, "word timing snapped to the vocal"));
   $("#song-meta").replaceChildren(...meta);
   const src = song.source;
   $("#song-source").hidden = !src;
@@ -461,14 +370,11 @@ function renderSong() {
       return el("div", { class: "line instrumental" }, items);
     }
     const cells = row.words.map((w, i) => {
-      const chips = w.chords.map((id) => makeChip(id));
-      if (i === 0 && row.carry) chips.unshift(makeChip(row.carry, { carry: true }));
       const src = song.lines[row.line].words[w.i];
-      const word = el("span", { class: "word" + (src.approx ? " approx" : ""), title: fmtTime(w.start) }, w.text);
-      word.addEventListener("click", () => seekPlay(w.start));
-      S.words.push({ start: w.start, end: w.end, node: word });
-      return el("span", { class: "cell" + (w.bar != null ? " barline" : ""), title: w.bar != null ? `Bar ${w.bar + 1}` : null },
-        el("span", { class: "chords" }, chips), word);
+      const carry = i === 0 && row.carry ? makeChip(row.carry, { carry: true }) : null;
+      const { node, timing } = lyricCell(w, src, (id) => makeChip(id), carry);
+      S.words.push({ start: w.start, end: w.end, node: timing });
+      return node;
     });
     return el("div", { class: "line" + (row.gap_before ? " stanza" : "") }, cells);
   });
@@ -486,7 +392,9 @@ function setTab(tab) {
   $("#sheet").hidden = !guitar;
   $("#harp-panel").hidden = guitar;
   $("#capo-group").hidden = !guitar;
+  $("#instrument-group").hidden = !guitar;
   $("#octave-group").hidden = guitar || !S.song?.harmonica;
+  $("#harp-group").hidden = guitar || !S.song?.harmonica;
   $("#export-cho").hidden = $("#export-txt").hidden = !guitar;
   $("#export-harp").hidden = guitar;
   closeChordMenu();
@@ -706,6 +614,13 @@ function renderArrangement() {
   const song = S.song;
   const disp = song.display || {};
   $("#tr-val").textContent = (song.transpose > 0 ? "+" : "") + song.transpose;
+  const instSel = $("#instrument");
+  if (!instSel.options.length) {
+    (disp.instruments || []).forEach((i) => instSel.append(el("option", { value: i.id }, i.label)));
+  }
+  instSel.value = disp.instrument || "guitar";
+  const short = (disp.instrument_label || "Guitar").replace(/ \(.*$/, "");
+  $("#chord-instrument").textContent = short;
   const capo = $("#capo");
   if (!capo.options.length) {
     for (let i = 0; i <= 9; i++) capo.append(el("option", { value: i }, i ? `${i}` : "none"));
@@ -723,9 +638,7 @@ function renderArrangement() {
   const hasBars = !!song.beat_times?.length;
   $("#meter").value = song.meter?.time_signature || "4/4";
   ["#meter", "#db-left", "#db-right", "#show-bars"].forEach((sel) => { $(sel).disabled = !hasBars; });
-  const det = song.meter?.detected;
-  $("#meter-reset").hidden = !det || (det.time_signature === song.meter.time_signature &&
-    det.beats_per_bar === song.meter.beats_per_bar && det.downbeat === song.meter.downbeat);
+  $("#meter-reset").hidden = !song.meter?.detected || !meterIsManual(song);
 }
 
 async function saveSettings(body) {
@@ -742,6 +655,7 @@ async function saveSettings(body) {
 function initArrangement() {
   $("#tr-down").addEventListener("click", () => saveSettings({ transpose: Math.max(-11, (S.song.transpose || 0) - 1) }));
   $("#tr-up").addEventListener("click", () => saveSettings({ transpose: Math.min(11, (S.song.transpose || 0) + 1) }));
+  $("#instrument").addEventListener("change", (e) => saveSettings({ instrument: e.target.value }));
   $("#capo").addEventListener("change", (e) => saveSettings({ capo: Number(e.target.value) }));
   $("#capo-suggest").addEventListener("click", (e) => saveSettings({ capo: Number(e.target.dataset.capo) }));
   $("#meter").addEventListener("change", (e) => saveSettings({ time_signature: e.target.value }));

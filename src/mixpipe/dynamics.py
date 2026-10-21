@@ -7,9 +7,11 @@ computed vectorized where possible. It is not a model of any specific hardware.
 from __future__ import annotations
 
 import numpy as np
+from scipy.ndimage import maximum_filter1d
 
 from . import SAMPLE_RATE
-from .analysis import from_db, db, peak_db, integrated_lufs
+from ._fast import asym_smooth
+from .analysis import from_db, db, peak_db, integrated_lufs, true_peak_db, true_peak_detector
 
 EPS = 1e-12
 
@@ -55,16 +57,7 @@ def _smooth_gain(
     sustained loud passages, because the gain snaps back to unity on every
     waveform zero-crossing.
     """
-    a = np.exp(-1.0 / max(1.0, attack_ms / 1000.0 * sr))
-    r = np.exp(-1.0 / max(1.0, release_ms / 1000.0 * sr))
-    out = np.empty_like(target_gain)
-    state = target_gain[0] if target_gain.size else 1.0
-    for i in range(target_gain.size):
-        x = target_gain[i]
-        coef = a if x < state else r   # reducing gain -> attack
-        state = x + coef * (state - x)
-        out[i] = state
-    return out
+    return asym_smooth(target_gain, up_ms=release_ms, down_ms=attack_ms, sr=sr)
 
 
 def compress(
@@ -135,41 +128,48 @@ def compress_with_settings(audio: np.ndarray, settings: dict, sr: int = SAMPLE_R
     )
 
 
+TP_MARGIN_DB = 0.1
+
+
 def limit(
     audio: np.ndarray,
     ceiling_db: float = -1.0,
     lookahead_ms: float = 5.0,
     release_ms: float = 60.0,
     sr: int = SAMPLE_RATE,
+    true_peak: bool = False,
 ) -> np.ndarray:
     """Lookahead peak limiter.
 
     Delays the signal by the lookahead time and computes a gain envelope from the
-    future peak, so attacks are caught rather than clipped. This is a *sample*
-    peak limiter: it does not oversample, so inter-sample peaks can still exceed
-    the ceiling after conversion to lossy formats. Set the ceiling to -1 dB and
-    don't treat this as release-grade.
+    future peak, so attacks are caught rather than clipped.
+
+    By default this watches *sample* peaks, so inter-sample peaks can still
+    exceed the ceiling after a DAC or lossy encode. With `true_peak=True` the
+    detector sees the 4x-oversampled signal instead, and the result is checked
+    against it: if the true peak still lands over the ceiling (the gain moves
+    between samples) the limiter runs again with the ceiling lowered by the
+    overshoot, up to three times.
     """
     ceiling = float(from_db(ceiling_db))
     look = max(1, int(lookahead_ms / 1000.0 * sr))
 
-    detector = np.abs(audio) if audio.ndim == 1 else np.max(np.abs(audio), axis=1)
+    if true_peak:
+        detector = true_peak_detector(audio)
+    else:
+        detector = np.abs(audio) if audio.ndim == 1 else np.max(np.abs(audio), axis=1)
 
-    # Sliding maximum over the lookahead window, via a padded strided max.
+    # Maximum over the next `look` samples (inclusive), in O(n).
     padded = np.pad(detector, (0, look), mode="edge")
-    windows = np.lib.stride_tricks.sliding_window_view(padded, look + 1)
-    future_peak = windows.max(axis=1)[: detector.size]
+    future_peak = maximum_filter1d(padded, size=look + 1, origin=-(look // 2) - (look % 2))[: detector.size]
 
-    required = np.minimum(1.0, ceiling / np.maximum(future_peak, EPS))
+    # the gain moves between samples, so aim a hair under the ceiling when watching
+    # true peaks; that usually saves the corrective re-run below
+    aim = ceiling * (from_db(-TP_MARGIN_DB) if true_peak else 1.0)
+    required = np.minimum(1.0, aim / np.maximum(future_peak, EPS))
 
     # Release-only smoothing: gain must drop instantly, recover slowly.
-    r = np.exp(-1.0 / max(1.0, release_ms / 1000.0 * sr))
-    gain = np.empty_like(required)
-    state = 1.0
-    for i in range(required.size):
-        target = required[i]
-        state = target if target < state else target + r * (state - target)
-        gain[i] = state
+    gain = asym_smooth(required, up_ms=release_ms, down_ms=0.0, sr=sr, init=1.0)
 
     # Delay the audio to align with the gain envelope it was computed from.
     if audio.ndim == 1:
@@ -181,7 +181,16 @@ def limit(
         )[: audio.shape[0]]
         out = delayed * gain[:, None]
 
-    return np.clip(out, -ceiling, ceiling).astype(np.float32)
+    out = np.clip(out, -ceiling, ceiling).astype(np.float32)
+    if true_peak and ceiling_db > -40.0:
+        over = true_peak_db(out) - ceiling_db
+        if over > 0.01:
+            for _ in range(3):
+                out = limit(out, ceiling_db - over - 0.02, lookahead_ms, release_ms, sr, true_peak=True)
+                over = true_peak_db(out) - ceiling_db
+                if over <= 0.01:
+                    break
+    return out
 
 
 def gain_staging_report(audio: np.ndarray, label: str = "") -> dict:
@@ -189,24 +198,96 @@ def gain_staging_report(audio: np.ndarray, label: str = "") -> dict:
     return {"label": label, "peak_db": round(peak_db(audio), 2)}
 
 
-def transient_shaper(
-    audio: np.ndarray, attack: float = 0.0, sustain: float = 0.0, sr: int = SAMPLE_RATE
+def _envelope_db(
+    detector: np.ndarray, attack_ms: float, release_ms: float, sr: int
 ) -> np.ndarray:
-    """Attack/sustain shaping, independent of level.
+    """Peak envelope follower, in dB."""
+    env = asym_smooth(detector, up_ms=attack_ms, down_ms=release_ms, sr=sr, init=0.0)
+    return db(np.maximum(env, EPS))
 
-    # TODO: implement with two envelope followers at different time constants;
-    # their difference isolates transients. Useful for acoustic guitar pick
-    # attack and for taming a boomy room on the sustain.
+
+def transient_shaper(
+    audio: np.ndarray, attack: float = 0.0, sustain: float = 0.0,
+    sr: int = SAMPLE_RATE, max_gain_db: float = 12.0,
+) -> np.ndarray:
+    """Attack/sustain shaping that follows the signal, independent of level.
+
+    Two pairs of envelope followers; the difference of each pair isolates one
+    part of a note:
+
+      attack   a fast and a slow follower with the same release. On a note onset
+               the fast one jumps first, so (fast - slow) is positive only
+               during the attack.
+      sustain  two followers with the same attack but a fast and a slow release.
+               After the peak the slow-release one holds up, so (slow - fast) is
+               positive only during the decay.
+
+    Each difference, in dB, scaled by `attack` / `sustain` (-1 to +1), becomes a
+    gain move: positive adds punch / lets the tail bloom, negative softens the
+    pick or tightens a boomy room. Because it works on the difference between
+    envelopes, a loud passage and a quiet one are shaped alike. The total move
+    is capped at +/-`max_gain_db`.
     """
-    pass  # TODO
-    return audio
+    attack = float(np.clip(attack, -1.0, 1.0))
+    sustain = float(np.clip(sustain, -1.0, 1.0))
+    if audio.size == 0 or (abs(attack) < 1e-3 and abs(sustain) < 1e-3):
+        return audio
+
+    detector = np.abs(audio) if audio.ndim == 1 else np.max(np.abs(audio), axis=1)
+    gain_db = np.zeros(detector.size)
+    if abs(attack) >= 1e-3:
+        fast = _envelope_db(detector, 1.0, 60.0, sr)
+        slow = _envelope_db(detector, 25.0, 60.0, sr)
+        gain_db += attack * np.maximum(fast - slow, 0.0)
+    if abs(sustain) >= 1e-3:
+        quick = _envelope_db(detector, 1.0, 8.0, sr)
+        held = _envelope_db(detector, 1.0, 150.0, sr)
+        gain_db += sustain * np.maximum(held - quick, 0.0)
+    gain_db = np.clip(gain_db, -max_gain_db, max_gain_db)
+
+    # Smooth the gain move so it never zippers (a few ms is inaudible as a lag).
+    gain = asym_smooth(from_db(gain_db), up_ms=3.0, down_ms=3.0, sr=sr, init=1.0)
+    out = audio * (gain if audio.ndim == 1 else gain[:, None])
+    return out.astype(np.float32)
 
 
-def multiband_compress(audio: np.ndarray, sr: int = SAMPLE_RATE) -> np.ndarray:
+# A gentle starting point for a mastering bus: wide, slow, low ratios.
+DEFAULT_MULTIBAND = {
+    "crossovers": [150.0, 4000.0],
+    "bands": [
+        {"threshold_db": -18.0, "ratio": 2.0, "attack_ms": 30.0, "release_ms": 180.0,
+         "makeup_db": 0.0},
+        {"threshold_db": -16.0, "ratio": 1.8, "attack_ms": 15.0, "release_ms": 120.0,
+         "makeup_db": 0.0},
+        {"threshold_db": -20.0, "ratio": 1.8, "attack_ms": 5.0, "release_ms": 80.0,
+         "makeup_db": 0.0},
+    ],
+}
+
+
+def multiband_compress(
+    audio: np.ndarray, sr: int = SAMPLE_RATE, crossovers: list[float] | None = None,
+    bands: list[dict] | None = None,
+) -> np.ndarray:
     """Per-band compression for the master bus.
 
-    # TODO: 3-4 band Linkwitz-Riley crossover, independent compressors, sum.
-    # The single-band glue comp in master.py is the interim stand-in.
+    Splits the signal with phase-coherent Linkwitz-Riley (LR4) crossovers, runs
+    an independent compressor on each band, and sums. With every band's ratio at
+    1 the sum is the input again (an LR4 crossover sums flat in magnitude; only
+    the phase rotates). `crossovers` has one entry fewer than `bands`.
     """
-    pass  # TODO
-    return audio
+    from .eq import split_bands
+
+    cfg = DEFAULT_MULTIBAND
+    crossovers = list(crossovers if crossovers is not None else cfg["crossovers"])
+    bands = list(bands if bands is not None else cfg["bands"])
+    if len(bands) != len(crossovers) + 1:
+        raise ValueError("multiband_compress needs one more band than crossovers")
+    if audio.size == 0:
+        return audio
+
+    parts = split_bands(audio, crossovers, sr)
+    out = np.zeros(audio.shape, dtype=np.float64)
+    for part, settings in zip(parts, bands):
+        out += compress_with_settings(part, settings, sr)
+    return out.astype(np.float32)

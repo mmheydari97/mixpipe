@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MixPipe Mixer</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23b4441f'/%3E%3Cg fill='white'%3E%3Crect x='7' y='6' width='3' height='20' rx='1.5'/%3E%3Crect x='14.5' y='6' width='3' height='20' rx='1.5'/%3E%3Crect x='22' y='6' width='3' height='20' rx='1.5'/%3E%3Crect x='5' y='16' width='7' height='3' rx='1.5'/%3E%3Crect x='12.5' y='10' width='7' height='3' rx='1.5'/%3E%3Crect x='20' y='19' width='7' height='3' rx='1.5'/%3E%3C/g%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/common.css">
+  <link rel="stylesheet" href="/static/mixer.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">mixpipe <span>mixer</span></a>
+  </header>
+
+  <main>
+    <!-- ================= start ================= -->
+    <section id="start-view" hidden>
+      <div class="card">
+        <h2>New mix</h2>
+        <div class="tabs" role="tablist">
+          <button role="tab" id="tab-splitter" aria-selected="true">From the splitter</button>
+          <button role="tab" id="tab-upload" aria-selected="false">Upload stems</button>
+        </div>
+        <div id="pane-splitter">
+          <ul id="splitter-list" class="pick-list"><li class="muted">Loading…</li></ul>
+        </div>
+        <div id="pane-upload" hidden>
+          <div id="source-picker"></div>
+          <p class="muted small">One file per instrument or voice. The name decides how it is treated
+            (<code>vocal_lead.wav</code>, <code>acoustic.wav</code>, <code>bass.flac</code>, <code>drums.wav</code>…).</p>
+        </div>
+        <label class="field">
+          <span>Notes for the first mix <small class="muted">(optional)</small></span>
+          <textarea id="first-notes" rows="2" placeholder="e.g. vocals up front, keep the harmonica in the back"></textarea>
+        </label>
+        <div class="row">
+          <label class="check"><input type="checkbox" id="use-llm" checked> Use a language model for the first mix and the chat
+            <small id="llm-hint" class="muted"></small></label>
+        </div>
+        <div class="field" id="model-field" hidden>
+          <span>OpenRouter model</span>
+          <div id="model-picker"></div>
+          <small class="muted">Type <b>free</b> to put free models first. A small model sometimes answers in a
+            form the mixer can't use; that message then falls back to the keyword rules.</small>
+        </div>
+        <div class="actions">
+          <button id="mix-btn" class="primary" disabled>Mix</button>
+        </div>
+        <div id="start-error" class="msg error" hidden></div>
+      </div>
+
+      <div class="card">
+        <h2>Sessions</h2>
+        <ul id="session-list" class="song-list"><li class="muted">None yet.</li></ul>
+      </div>
+    </section>
+
+    <!-- ================= session ================= -->
+    <section id="session-view" hidden>
+      <div class="song-head">
+        <a href="#/" class="back">← New mix</a>
+        <h1 id="session-title"></h1>
+        <p id="session-badges" class="badges"></p>
+      </div>
+
+      <div id="session-progress"></div>
+
+      <div id="session" class="session-grid" hidden>
+        <div class="col-main">
+          <div class="card player">
+            <div class="card-head">
+              <h2>Listen</h2>
+              <label class="check small"><input type="checkbox" id="match-loudness" checked> Loudness-matched</label>
+            </div>
+            <div class="ab">
+              <button id="play-btn" class="primary" aria-label="Play">▶</button>
+              <div class="ab-switch" role="group" aria-label="Compare">
+                <button id="ab-a" class="on" aria-pressed="true">A <span id="ab-a-label"></span></button>
+                <button id="ab-b" aria-pressed="false">B <span id="ab-b-label"></span></button>
+              </div>
+              <select id="ab-b-select" aria-label="Version B"></select>
+            </div>
+            <input type="range" id="seek" min="0" max="1000" value="0" aria-label="Position">
+            <div class="time"><span id="t-now">0:00</span><span id="t-total">0:00</span></div>
+            <div id="output-stats" class="stats"></div>
+            <audio id="audio-a" preload="auto"></audio>
+            <audio id="audio-b" preload="auto"></audio>
+          </div>
+
+          <div class="card chat">
+            <div class="card-head">
+              <h2>Talk to the mix</h2>
+              <button id="model-btn" class="model-btn" aria-expanded="false" aria-controls="model-panel"></button>
+            </div>
+            <div id="model-panel" class="model-panel" hidden>
+              <div id="session-model-picker"></div>
+              <div class="btn-row">
+                <button id="model-rules">Use the keyword rules instead</button>
+                <button id="model-close">Done</button>
+              </div>
+              <p class="muted small">Used from your next message on; earlier versions keep the model that made them.</p>
+            </div>
+            <ol id="chat-log" class="chat-log"></ol>
+            <div class="suggestions" id="suggestions"></div>
+            <form id="chat-form" class="chat-form">
+              <input id="chat-input" autocomplete="off" placeholder="e.g. the acoustic guitar is too loud" aria-label="Message">
+              <button class="primary" id="chat-send">Send</button>
+            </form>
+          </div>
+        </div>
+
+        <div class="col-side">
+          <div class="card">
+            <div class="card-head">
+              <h2>Versions</h2>
+              <div class="btn-row">
+                <button id="undo-btn" title="Back to the version this one came from">Undo</button>
+                <button id="redo-btn">Redo</button>
+              </div>
+            </div>
+            <ol id="version-list" class="version-list"></ol>
+            <div class="export">
+              <select id="export-depth" aria-label="Bit depth">
+                <option value="24">WAV 24-bit</option>
+                <option value="16">WAV 16-bit (dithered)</option>
+              </select>
+              <button id="export-btn">Export</button>
+            </div>
+            <p id="export-msg" class="muted small"></p>
+          </div>
+
+          <div class="card">
+            <h2>Channels</h2>
+            <table class="channels">
+              <thead><tr><th>Stem</th><th title="Level in the mix, relative to the whole">In mix</th><th>Fader</th><th>Mute</th></tr></thead>
+              <tbody id="channel-rows"></tbody>
+            </table>
+            <p class="muted small">Faders and chat make the same kind of change, and either can be undone.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/common.js"></script>
+  <script src="/static/mixer.js"></script>
+</body>
+</html>

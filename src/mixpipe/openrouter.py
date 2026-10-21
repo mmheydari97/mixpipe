@@ -4,6 +4,7 @@ Three calls:
 
   list_models(kind)  - public model catalogue, normalised for the UI picker.
                        kind="chat" or "transcription". No API key needed.
+                       search_models() ranks it the way the web picker does.
   chat(...)          - chat completion, returns the reply text.
   transcribe(...)    - speech-to-text via /audio/transcriptions.
 
@@ -14,10 +15,14 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import time
 
 API = "https://openrouter.ai/api/v1"
 
+# vendor/model, optionally :variant ("anthropic/claude-haiku-5.5", "meta-llama/x:free"),
+# or a "~vendor/family-latest" alias that follows the newest model of a family
+MODEL_ID = re.compile(r"^~?[A-Za-z0-9][\w.\-]*/[\w.\-:]+$")
 _CACHE_TTL_S = 3600.0
 _model_cache: dict[str, tuple[float, list[dict]]] = {}
 
@@ -102,6 +107,37 @@ def normalize_model(model: dict, kind: str) -> dict:
     }
 
 
+def valid_model_id(model: str | None) -> bool:
+    """Shaped like an OpenRouter model id. Says nothing about whether it exists."""
+    return bool(model) and len(model) <= 200 and MODEL_ID.match(model) is not None
+
+
+def search_models(models: list[dict], query: str = "") -> list[dict]:
+    """Rank catalogue entries for a search, like the web picker (`rankModels` in
+    static/common.js): every word must appear in the id, name or description,
+    matches at the start of the id or name count most, then the cheaper model wins.
+    The word "free" puts free models first."""
+    tokens = query.lower().split()
+    want_free = "free" in tokens
+    terms = [t for t in tokens if t != "free"]
+    scored = []
+    for m in models:
+        mid, name, desc = m["id"].lower(), (m.get("name") or "").lower(), (m.get("description") or "").lower()
+        tail = mid.split("/")[-1]
+        score = 0
+        for t in terms:
+            s = (30 if tail.startswith(t) or mid.startswith(t) else 25 if name.startswith(t)
+                 else 20 if t in mid else 15 if t in name else 4 if t in desc else 0)
+            if not s:
+                break
+            score += s
+        else:
+            scored.append((m, score))
+    scored.sort(key=lambda ms: (-int(ms[0]["is_free"]) if want_free else 0, -ms[1],
+                                ms[0]["sort_price"], ms[0]["name"]))
+    return [m for m, _ in scored]
+
+
 def list_models(kind: str = "chat", refresh: bool = False) -> list[dict]:
     """Fetch and normalise the catalogue. Cached in memory for an hour."""
     if kind not in ("chat", "transcription"):
@@ -117,6 +153,8 @@ def list_models(kind: str = "chat", refresh: bool = False) -> list[dict]:
     resp = requests.get(f"{API}/models", params=params, timeout=30)
     resp.raise_for_status()
     raw = resp.json().get("data", [])
+    # ":batch" variants only work through the batch API; chat/completions answers 404
+    raw = [m for m in raw if not str(m.get("id", "")).endswith(":batch")]
     if kind == "chat":
         # text-in/text-out only: drops music, image and speech generators
         raw = [
@@ -138,18 +176,25 @@ def chat(
     model: str,
     max_tokens: int = 4000,
     timeout: float = 120.0,
+    reasoning_effort: str | None = None,
 ) -> str:
-    """Chat completion. Returns the assistant's reply text."""
+    """Chat completion. Returns the assistant's reply text.
+
+    A reasoning model's thinking counts against `max_tokens`, so a long think can
+    cut the reply off mid-JSON; `reasoning_effort` ("low", "medium", "high") keeps
+    it in check (models without reasoning ignore it). A reply that was cut off
+    raises instead of returning half an answer."""
     import requests
 
-    resp = requests.post(
-        f"{API}/chat/completions",
-        headers=_headers(),
-        json={"model": model, "max_tokens": max_tokens, "messages": messages},
-        timeout=timeout,
-    )
+    body = {"model": model, "max_tokens": max_tokens, "messages": messages}
+    if reasoning_effort:
+        body["reasoning"] = {"effort": reasoning_effort}
+    resp = requests.post(f"{API}/chat/completions", headers=_headers(), json=body, timeout=timeout)
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
+    choice = resp.json()["choices"][0]
+    if choice.get("finish_reason") == "length":
+        raise RuntimeError(f"the reply from {model} was cut off at {max_tokens} tokens")
+    return choice["message"]["content"] or ""
 
 
 def transcribe(

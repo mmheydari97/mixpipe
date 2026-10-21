@@ -1,5 +1,6 @@
 "use strict";
-// Harmonica tab: the melody as 12-hole C chromatic harmonica tab (solo tuning).
+// Harmonica tab: the melody as tab for a 12-hole chromatic or a 10-hole diatonic
+// harmonica in any key.
 // Load after app.js; uses its S, audio, synth, fmtTime, findAt, followWord,
 // showMenu, closeChordMenu, playSection, stopAudition, saveSettings, alertInline.
 
@@ -48,6 +49,38 @@ synth.playNote = function (midi, duration) {
 
 const noteLabel = (n) => (n.rest ? "rest" : `${n.display} ${n.tab || "—"}`);
 
+// ---- instrument ------------------------------------------------------------------
+
+const HARP_KEYS = ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
+const prettyKey = (k) => k.replace("#", "♯").replace("b", "♭");
+
+function renderInstrument(hv) {
+  const inst = hv.instrument;
+  const keySel = $("#harp-key");
+  if (!keySel.options.length) {
+    HARP_KEYS.forEach((k) => keySel.append(el("option", { value: k }, prettyKey(k))));
+  }
+  $("#harp-type").value = inst.type;
+  keySel.value = inst.key;
+  $("#harp-name").textContent = inst.short_name;
+  $("#harp-legend").replaceChildren(...(inst.diatonic
+    ? [el("b", {}, "3↑"), " blow · ", el("b", {}, "3↓"), " draw · ", el("b", {}, "′ ″ ‴"), " bend ½ / 1 / 1½ steps"]
+    : [el("b", {}, "3↑"), " blow · ", el("b", {}, "3↓"), " draw · ", el("b", {}, "●"), " button in"]));
+  $("#fast-notes").checked = !!hv.fast;
+  const sug = (hv.suggestions || []).slice(0, 4);
+  const box = $("#harp-suggest");
+  box.hidden = !sug.length;
+  if (sug.length) {
+    box.replaceChildren(el("span", { class: "lbl" }, "Diatonic harps that suit this melody:"),
+      ...sug.map((r) => el("button", {
+        class: r.current && inst.diatonic ? "on" : "",
+        title: `${r.position ? r.position + ". " : ""}${Math.round(r.playable * 100)}% of the melody is playable, `
+          + `${Math.round(r.unbent * 100)}% without bending.`,
+        onclick: () => saveSettings({ harmonica_type: "diatonic10", harmonica_key: r.key }),
+      }, el("b", {}, prettyKey(r.key)), el("small", {}, `${r.position ? r.position.split(" ")[0] + " pos · " : ""}${Math.round(r.unbent * 100)}% no bends`))));
+  }
+}
+
 // ---- rendering ---------------------------------------------------------------
 
 function makeNoteChip(id) {
@@ -84,6 +117,9 @@ function renderHarmonica() {
   $("#melody-btn").textContent = hv ? "Re-detect melody" : "Find melody";
   $("#melody-btn").title = hv ? "Find the melody again (your note edits on this tab are replaced)" : "";
   $("#octave-group").hidden = S.tab !== "harmonica" || !hv;
+  $("#harp-group").hidden = S.tab !== "harmonica" || !hv;
+  $("#add-note-btn").disabled = !hv;
+  $("#harp-suggest").hidden = true;
   if (!hv) {
     $("#harp-meta").replaceChildren();
     sheet.replaceChildren(el("p", { class: "muted" },
@@ -92,6 +128,7 @@ function renderHarmonica() {
     return;
   }
 
+  renderInstrument(hv);
   H.notes = new Map(hv.notes.map((n) => [n.id, n]));
   H.timeline = hv.notes.filter((n) => !n.rest).sort((a, b) => a.start - b.start);
   const instr = H.timeline.filter((n) => n.source === "instr").length;
@@ -124,11 +161,9 @@ function renderHarmonica() {
     }
     const cells = row.words.map((w) => {
       const src = song.lines[row.line].words[w.i];
-      const word = el("span", { class: "word" + (src.approx ? " approx" : ""), title: fmtTime(w.start) }, w.text);
-      word.addEventListener("click", () => seekPlay(w.start));
-      H.words.push({ start: w.start, end: w.end, node: word });
-      return el("span", { class: "cell" + (w.bar != null ? " barline" : ""), title: w.bar != null ? `Bar ${w.bar + 1}` : null },
-        el("span", { class: "chords" }, w.chords.map(makeNoteChip)), word);
+      const { node, timing } = lyricCell(w, src, makeNoteChip, null);
+      H.words.push({ start: w.start, end: w.end, node: timing });
+      return node;
     });
     return el("div", { class: "line" + (row.gap_before ? " stanza" : "") }, cells);
   });
@@ -170,6 +205,40 @@ async function saveNote(id, body) {
   }
 }
 
+async function editNotes(body) {
+  try {
+    S.song = await api(`/api/songs/${S.song.id}/notes`, jsonBody("POST", body));
+    renderSong();
+    tick();
+  } catch (e) {
+    alertInline($("#harp-panel"), e.message);
+  }
+}
+
+// add a note the tracker missed: starts at the playhead, lasts until the next note (max 1 s)
+function openAddNote(anchor) {
+  const key = "add-note";
+  if (S.menuFor === key && !$("#chord-menu").hidden) { closeChordMenu(); return; }
+  closeChordMenu();
+  const start = Math.round(audio.currentTime * 100) / 100;
+  const later = [...H.notes.values()].filter((n) => n.start > start + 0.05).sort((a, b) => a.start - b.start)[0];
+  const end = Math.round(Math.min(start + 1, later ? later.start - 0.02 : start + 1) * 100) / 100;
+  const input = el("input", { type: "text", placeholder: "Note, e.g. C5, F# or Bb" });
+  const apply = () => {
+    const note = input.value.trim();
+    if (!note) return;
+    closeChordMenu();
+    editNotes({ action: "add", start, end, note });
+  };
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") apply(); if (e.key === "Escape") closeChordMenu(); });
+  showMenu([
+    el("div", { class: "head" }, el("span", {}, `New note at ${fmtTime(start)}`), el("span", {}, `${(end - start).toFixed(2)} s`)),
+    el("div", { class: "custom-row" }, input, el("button", { onclick: apply }, "Add")),
+    el("div", { class: "hint" }, "Move the playhead to where the note starts first. No octave = the nearest one."),
+  ], anchor, key);
+  input.focus();
+}
+
 function auditionNote(n, sungMidi) {
   const dur = Math.min(Math.max(n.end - n.start, 0.6), 10);
   playSection(n.start, dur, sungMidi != null && (() => synth.playNote(sungMidi, n.end - n.start)));
@@ -200,7 +269,7 @@ function openNoteMenu(id, anchor) {
       el("span", { class: "lbl" }, "Play as"),
       n.fingerings.map((f, i) => el("button", {
         class: i === n.fingering_index ? "on" : "",
-        title: `Hole ${f.hole}, ${f.breath}${f.button ? ", button in" : ""}`,
+        title: `Hole ${f.hole}, ${f.breath}${f.bend ? `, bend ${f.bend} semitone${f.bend > 1 ? "s" : ""}` : ""}${f.button ? ", button in" : ""}`,
         "aria-pressed": String(i === n.fingering_index),
         onclick: () => { closeChordMenu(); saveNote(id, { fingering: i }); },
       }, f.tab)),
@@ -223,6 +292,21 @@ function openNoteMenu(id, anchor) {
     el("button", { onclick: () => auditionNote(n, null) }, "▶ Section only"),
     el("button", { onclick: () => auditionNote(n, n.sung) }, "▶ With current"),
     el("button", { onclick: stopAudition }, "■ Stop")));
+  const sorted = [...H.notes.values()].sort((a, b) => a.start - b.start);
+  const next = sorted[sorted.findIndex((x) => x.id === id) + 1];
+  const t = audio.currentTime;
+  const splitAt = t > n.start + 0.05 && t < n.end - 0.05 ? t : null;
+  rows.push(el("div", { class: "foot" },
+    el("button", {
+      title: splitAt ? "Cut this note in two at the playhead" : "Cut this note in two in the middle (or move the playhead inside it first)",
+      disabled: n.end - n.start < 0.12,
+      onclick: () => { closeChordMenu(); editNotes({ action: "split", id, at: splitAt }); },
+    }, splitAt ? "✂ Split at playhead" : "✂ Split in half"),
+    el("button", {
+      title: "Join this note and the next into one",
+      disabled: !next,
+      onclick: () => { closeChordMenu(); editNotes({ action: "merge", ids: [id, next.id] }); },
+    }, "⇥ Merge with next")));
   rows.push(el("div", { class: "foot" },
     n.rest
       ? el("button", { onclick: () => { closeChordMenu(); saveNote(id, { custom: "" }); } }, "↺ Restore note")
@@ -239,7 +323,7 @@ async function findMelody() {
   const id = S.song.id;
   btn.disabled = true;
   try {
-    await api(`/api/songs/${id}/melody`, { method: "POST" });
+    await api(`/api/songs/${id}/melody`, jsonBody("POST", { fast: $("#fast-notes").checked }));
     await harpJob.pollStatus(id, box, {
       onDone: async () => {
         box.replaceChildren();
@@ -274,6 +358,9 @@ function initHarmonica() {
   $("#oct-down").addEventListener("click", () => saveSettings({ harmonica_octave: Math.max(-3, user() - 1) }));
   $("#oct-up").addEventListener("click", () => saveSettings({ harmonica_octave: Math.min(3, user() + 1) }));
   $("#oct-auto").addEventListener("click", () => saveSettings({ harmonica_octave: 0 }));
+  $("#harp-type").addEventListener("change", (e) => saveSettings({ harmonica_type: e.target.value }));
+  $("#harp-key").addEventListener("change", (e) => saveSettings({ harmonica_key: e.target.value }));
+  $("#add-note-btn").addEventListener("click", (e) => openAddNote(e.currentTarget));
 }
 
 initHarmonica();

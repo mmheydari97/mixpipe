@@ -807,3 +807,796 @@ def test_api_link_download_failure_then_retry(tmp_path, progression_audio, fake_
     calls["fail"] = False
     client.post("/api/songs/link", json={"url": "https://youtu.be/abc", "rerun": True})
     assert client.get(f"/api/songs/{sid}/status").json()["state"] == "done"
+
+
+# --------------------------------------------------------------------------- #
+# syllables: chords over the syllable they change on
+# --------------------------------------------------------------------------- #
+
+from mixpipe.chords import syllables as syl  # noqa: E402
+
+
+@pytest.mark.parametrize("word,expected", [
+    ("amazing", "a-ma-zing"), ("hello", "hel-lo"), ("table", "ta-ble"), ("little", "lit-tle"),
+    ("mother", "mo-ther"), ("monster", "mon-ster"), ("winter", "win-ter"), ("people", "peo-ple"),
+    ("love", "love"), ("walked", "walked"), ("wanted", "wan-ted"), ("friend", "friend"),
+    ("I've", "I've"), ("don't", "don't"), ("lonely", "lone-ly"), ("hallelujah", "hal-le-lu-jah"),
+    ("beautiful", "beau-ti-ful"), ("my", "my"), ("baby", "ba-by"), ("believe", "be-lieve"),
+])
+def test_english_syllables(word, expected):
+    assert "-".join(syl.syllables(word, "en")) == expected
+
+
+def test_other_scripts_and_languages():
+    assert syl.syllables("ありがとう") == list("ありがとう")
+    assert syl.syllables("きょう") == ["きょ", "う"]            # small kana stay with the one before
+    assert syl.syllables("사랑해") == list("사랑해")
+    # scripts without written short vowels are not guessed: the word stays whole
+    assert syl.syllable_breaks("سلام") == [] and syl.syllables("שלום") == ["שלום"]
+    assert syl.syllables("Liebe", "de") == ["Lie", "be"] and syl.syllables("bella", "it") == ["bel", "la"]
+    assert syl.syllable_breaks("123") == [] and syl.syllables("") == [] and syl.syllables("a") == ["a"]
+    assert syl.syllable_breaks("amazing") == [1, 3]
+
+
+def test_syllable_spans_share_the_words_time():
+    spans = syl.syllable_spans({"text": "amazing", "start": 10.0, "end": 11.5})
+    assert [s["text"] for s in spans] == ["a", "ma", "zing"]
+    assert [s["c"] for s in spans] == [0, 1, 3]
+    assert spans[0]["start"] == 10.0 and spans[-1]["end"] == 11.5
+    assert all(a["end"] == b["start"] for a, b in zip(spans, spans[1:]))
+    assert spans[2]["end"] - spans[2]["start"] > spans[0]["end"] - spans[0]["start"]   # longer syllable, longer share
+    assert syl.syllable_spans({"text": "friend", "start": 1, "end": 2}) == []
+    assert syl.syllable_spans({"text": "amazing", "start": 2, "end": 2}) == []
+
+
+def test_envelope_dip_moves_the_boundary():
+    word = {"text": "hello", "start": 2.0, "end": 3.0}
+    flat = syl.syllable_spans(word, "en", [200] * 600)
+    plain = syl.syllable_spans(word, "en")
+    assert flat == plain                                   # nothing to follow: weights decide
+    env = [200] * 600
+    for i in range(257, 263):                               # the voice dips at ~2.6 s
+        env[i] = 20
+    spans = syl.syllable_spans(word, "en", env)
+    assert abs(spans[1]["start"] - 2.6) < 0.03 and abs(plain[1]["start"] - 2.6) > 0.05
+    assert spans[0]["end"] == spans[1]["start"] and spans[1]["end"] == 3.0
+    # via the factory: envelope indices are absolute seconds
+    fn = syl.make_syllabifier("en", {"hop": 0.01, "v": env})
+    assert abs(fn(word)[1]["start"] - 2.6) < 0.03
+    assert syl.make_syllabifier("en", {"hop": 0.02, "v": env})(word) == plain   # wrong resolution: ignored
+
+
+def test_loudness_envelope():
+    sr = 8000
+    t = np.arange(sr * 2) / sr
+    y = (0.5 * np.sin(2 * np.pi * 200 * t) * (t < 1.0)).astype(np.float32)
+    env = syl.loudness_envelope(y, sr)
+    assert abs(len(env) - 200) <= 2 and all(0 <= v <= 255 for v in env)
+    assert min(env[10:90]) > 230 and max(env[110:190]) < 5
+    assert syl.loudness_envelope(np.zeros(5, dtype=np.float32), sr) == []
+
+
+@pytest.fixture
+def held_word_sheet():
+    lines = [{"words": [W("I", 9.6, 9.8), W("amazing", 10.0, 11.5), W("grace", 11.6, 12.4)],
+              "gap_before": False}]
+    chords = [chord("a", "G", 9.4, 10.5), chord("b", "D", 10.5, 11.6), chord("c", "Em", 11.6, 13.0)]
+    return {"title": "Grace", "key": "G:maj", "tempo": 120.0, "beat_period": 0.5,
+            "lines": lines, "chords": chords}
+
+
+def test_mid_word_chord_sits_over_its_syllable(held_word_sheet):
+    rows = build_rows(held_word_sheet["lines"], held_word_sheet["chords"], 0.5,
+                      syllabify=syl.make_syllabifier("en"))
+    w = rows[0]["words"][1]
+    assert rows[0]["type"] == "lyric" and w["text"] == "amazing" and w["chords"] == ["b"]
+    assert [s["text"] for s in w["syl"]] == ["a", "ma", "zing"]
+    assert w["at"] == {"b": 1}                          # the change at 10.5 is on "ma"
+    assert "syl" not in rows[0]["words"][0] and "syl" not in rows[0]["words"][2]   # nothing to place
+    plain = build_rows(held_word_sheet["lines"], held_word_sheet["chords"], 0.5)
+    assert "syl" not in plain[0]["words"][1]
+
+
+def test_exports_put_the_chord_before_the_syllable(held_word_sheet):
+    cho = to_chordpro(held_word_sheet)
+    assert "[G]I a[D]mazing [Em]grace" in cho
+    txt = to_text(held_word_sheet).splitlines()
+    i = txt.index("I amazing grace")
+    assert txt[i - 1].index("D") == txt[i].index("amazing") + 1       # over the "m" of a-ma-zing
+    assert txt[i - 1].split() == ["G", "D", "Em"]
+
+
+def test_one_syllable_words_keep_chords_at_the_edges():
+    lines = [{"words": [W("friend", 6.0, 7.0)], "gap_before": False}]
+    chords = [chord("a", "G", 5.8, 6.6), chord("b", "C", 6.6, 9.0)]
+    cho = to_chordpro({"title": "T", "key": "G:maj", "tempo": 120.0, "beat_period": 0.5,
+                       "lines": lines, "chords": chords})
+    # the late change goes after the word rather than splitting the letters
+    assert "[G]friend[C]" in cho
+    assert "fr[" not in cho and "frie[" not in cho
+
+
+def test_view_does_not_serve_the_envelope(held_word_sheet):
+    from mixpipe.chords.sheet import view
+
+    held_word_sheet["vocal_env"] = {"hop": 0.01, "v": [10] * 100}
+    sheet = {**held_word_sheet, "version": 3, "id": "x", "melody": None,
+             "meter": {"time_signature": "4/4", "beats_per_bar": 4, "downbeat": 0, "detected": None},
+             "transpose": 0, "capo": 0}
+    out = view(sheet)
+    assert "vocal_env" not in out
+    lyric = next(r for r in out["rows"] if r["type"] == "lyric")
+    assert lyric["words"][1]["syl"][1]["text"] == "ma"
+
+
+# --------------------------------------------------------------------------- #
+# re-timing text that came without word times
+# --------------------------------------------------------------------------- #
+
+from mixpipe.chords import retime as rt  # noqa: E402
+
+
+def sung_syllables(onsets, dur=0.35, sr=16_000, total=None):
+    """A 'vocal' that starts abruptly at each onset time and decays."""
+    total = total or (max(onsets) + 1.0)
+    y = np.zeros(int(total * sr), dtype=np.float32)
+    for k, t in enumerate(onsets):
+        i, n = int(t * sr), int(dur * sr)
+        tt = np.arange(n) / sr
+        f = 180 * 2 ** ((k % 5) / 12)
+        y[i:i + n] += (0.4 * np.sin(2 * np.pi * f * tt) * np.exp(-tt / 0.12)).astype(np.float32)[: len(y) - i]
+    return y
+
+
+TRUE_STARTS = [1.00, 1.62, 2.10, 2.95, 3.40, 4.30, 4.85, 5.60]
+
+
+def even_lines(words, t0, t1):
+    """What a text-only model gives: words spread evenly over the stretch."""
+    step = (t1 - t0) / len(words)
+    return [[{"text": w, "start": round(t0 + i * step, 3), "end": round(t0 + (i + 0.9) * step, 3)}
+             for i, w in enumerate(words)]]
+
+
+def test_snap_to_onsets_follows_the_voice():
+    vocal = sung_syllables(TRUE_STARTS, total=7.0)
+    lines = even_lines("one two three four five six seven eight".split(), 1.0, 6.0)
+    before = [w["start"] for w in lines[0]]
+    times, strength = rt._onsets(vocal, 16_000)
+    assert len(times) >= 7
+    snapped = rt.snap_to_onsets([{"words": lines[0], "gap_before": False}], times, strength)
+    after = [w["start"] for w in snapped[0]["words"]]
+    err_before = np.mean(np.abs(np.array(before) - TRUE_STARTS))
+    err_after = np.mean(np.abs(np.array(after) - TRUE_STARTS))
+    assert err_after < 0.03 < err_before
+    assert after == sorted(after) and all(b - a >= rt.SNAP_MIN_GAP_S - 1e-6 for a, b in zip(after, after[1:]))
+    assert all(w["end"] > w["start"] for w in snapped[0]["words"])
+    assert snapped[0]["words"][0]["text"] == "one"
+    assert rt.snap_to_onsets(snapped, np.zeros(0), np.zeros(0)) == snapped         # no onsets: unchanged
+
+
+def test_snap_leaves_a_word_with_no_onset_nearby():
+    lines = even_lines(["far", "away"], 10.0, 12.0)
+    times, strength = np.array([2.0, 3.0]), np.array([1.0, 1.0])
+    out = rt.snap_to_onsets([{"words": lines[0], "gap_before": False}], times, strength)
+    assert [w["start"] for w in out[0]["words"]] == [10.0, 11.0]
+
+
+def test_match_fraction():
+    timed = [[W("hello", 1, 1.4), W("darkness", 1.5, 2.2), W("my", 2.3, 2.5), W("cold", 2.6, 3.0)]]
+    assert rt.match_fraction(timed, "hello darkness my old friend") == pytest.approx(0.6)
+    assert rt.match_fraction(timed, "") == 0.0 and rt.match_fraction([], "a b") == 0.0
+    assert rt.match_fraction(timed, "Hello, DARKNESS!") == 1.0          # case and punctuation don't matter
+
+
+def approx_transcript(words):
+    return {"backend": "openrouter", "model": "m", "language": "en", "timing": "approx",
+            "lines": even_lines(words, 1.0, 6.0)}
+
+
+def test_retime_with_whisper_anchors():
+    words = "hello darkness my old friend".split()
+    heard = [[W("hello", 1.05, 1.40), W("darkness", 1.62, 2.60), W("my", 3.10, 3.30),
+              W("cold", 3.40, 3.90), W("friend", 4.30, 5.40)]]       # Whisper misheard "old"
+    out = rt.retime(approx_transcript(words), np.zeros(16_000, dtype=np.float32), 16_000,
+                    whisper=lambda v, sr, lang: heard)
+    assert out["timing"] == "aligned" and out["retimed"] == "whisper"
+    got = {w["text"]: w for w in out["lines"][0]}
+    assert [w["text"] for w in out["lines"][0]] == words              # the model's text, not Whisper's
+    assert (got["hello"]["start"], got["darkness"]["start"], got["friend"]["start"]) == (1.05, 1.62, 4.3)
+    assert got["my"]["end"] == 3.3
+    assert 3.3 <= got["old"]["start"] < got["old"]["end"] <= 4.3 and got["old"].get("approx")
+
+
+def test_retime_falls_back_to_onsets():
+    words = "one two three four five six seven eight".split()
+    vocal = sung_syllables(TRUE_STARTS, total=7.0)
+    tr = {"backend": "openrouter", "model": "m", "language": "en", "timing": "approx",
+          "lines": even_lines(words, 1.0, 6.0)}
+    for whisper in (lambda v, sr, lang: None,                                       # not installed
+                    lambda v, sr, lang: [[W("completely", 1, 2), W("different", 2, 3)]],  # too few words match
+                    lambda v, sr, lang: (_ for _ in ()).throw(RuntimeError("model missing"))):
+        out = rt.retime(tr, vocal, 16_000, whisper=whisper)
+        assert out["timing"] == "snapped" and out["retimed"] == "onsets"
+        starts = [w["start"] for w in out["lines"][0]]
+        assert np.mean(np.abs(np.array(starts) - TRUE_STARTS)) < 0.03
+    # nothing to go on: silence and no Whisper
+    silent = rt.retime(tr, np.zeros(16_000 * 7, dtype=np.float32), 16_000, whisper=lambda *a: None)
+    assert silent["timing"] == "approx" and silent["lines"] == tr["lines"]
+    assert rt.retime({"lines": [], "timing": "none"}, vocal, 16_000)["timing"] == "none"
+
+
+def approx_transcriber(vocal, sr, backend="mlx", model=None, language=None):
+    return {"backend": "openrouter", "model": "some/model", "language": "en", "timing": "approx",
+            "lines": even_lines("la la lah".split(), 4.0, 6.0)}
+
+
+def test_pipeline_retimes_and_records_the_models_own_capability(tmp_path, progression_audio):
+    from fastapi.testclient import TestClient
+
+    import soundfile as sf
+
+    from mixpipe.web.server import create_app
+
+    buf = io.BytesIO()
+    sf.write(buf, progression_audio, SR, format="WAV")
+    seen = []
+
+    def retimer(transcript, vocal, sr):
+        seen.append(transcript["timing"])
+        return {**transcript, "timing": "aligned", "retimed": "whisper"}
+
+    client = TestClient(create_app(tmp_path, separator=fake_separator, transcriber=approx_transcriber,
+                                   retimer=retimer, run_inline=True))
+    data = {"language": "en", "stt": "openrouter", "stt_model": "some/model"}
+    sid = client.post("/api/songs", files=[("files", ("a.wav", buf.getvalue(), "audio/wav"))],
+                      data=data).json()["id"]
+    song = client.get(f"/api/songs/{sid}").json()
+    assert seen == ["approx"]
+    assert song["transcript"]["timing"] == "aligned" and song["transcript"]["retimed"] == "whisper"
+    # the model picker still learns that this model returns no word times
+    caps = json.loads((tmp_path / "openrouter_caps.json").read_text())
+    assert caps == {"some/model": "approx"}
+    # the vocal's loudness envelope is stored with the sheet, for syllables
+    stored = json.loads((tmp_path / sid / "sheet.json").read_text())
+    assert stored["vocal_env"]["hop"] == 0.01 and len(stored["vocal_env"]["v"]) > 100
+
+    # opting out leaves the estimated times alone
+    client2 = TestClient(create_app(tmp_path / "b", separator=fake_separator, transcriber=approx_transcriber,
+                                    retimer=retimer, run_inline=True))
+    sid2 = client2.post("/api/songs", files=[("files", ("a.wav", buf.getvalue(), "audio/wav"))],
+                        data={**data, "retime": "false"}).json()["id"]
+    assert client2.get(f"/api/songs/{sid2}").json()["transcript"]["timing"] == "approx"
+    assert seen == ["approx"]
+
+
+# --------------------------------------------------------------------------- #
+# other instruments and tunings
+# --------------------------------------------------------------------------- #
+
+def test_instrument_profiles():
+    from mixpipe.chords.theory import INSTRUMENTS, instrument_choices, instrument_profile
+
+    assert set(INSTRUMENTS) >= {"guitar", "ukulele", "ukulele_d", "baritone_ukulele",
+                                "guitar_half_down", "guitar_whole_down"}
+    assert [c["id"] for c in instrument_choices()][0] == "guitar"
+    assert instrument_profile("nonsense") is INSTRUMENTS["guitar"]
+    assert instrument_profile(None)["tuning"] == 0
+    # D tuning sounds a whole step above the C-tuned shapes
+    assert INSTRUMENTS["ukulele_d"]["tuning"] == 2 and INSTRUMENTS["guitar_half_down"]["tuning"] == -1
+    # the ukulele's open chords are not the guitar's: E major and F# minor are barres there
+    uke, gtr = INSTRUMENTS["ukulele"]["easy"], INSTRUMENTS["guitar"]["easy"]
+    assert (5, "") in uke and (5, "") not in gtr         # F is open on a ukulele (2010)
+    assert (4, "") not in uke and (4, "") in gtr         # E is open on a guitar (022100)
+
+
+def test_capo_suggestion_depends_on_the_instrument():
+    from mixpipe.chords.theory import easy_fraction, suggest_capo
+
+    # E, E7, A, B7: all open on a guitar, barres on a ukulele
+    song = [(4, "", 2.0), (4, "7", 2.0), (9, "", 2.0), (11, "7", 2.0)]
+    assert easy_fraction(song, 0, 0, "guitar") > easy_fraction(song, 0, 0, "ukulele")
+    assert easy_fraction(song, 0, 0, "guitar") == 1.0
+    gtr = suggest_capo(song, instrument="guitar")
+    uke = suggest_capo(song, instrument="ukulele")
+    assert gtr is None                                   # nothing to improve
+    assert uke is not None and uke["capo"] != 0 and uke["easy"] > 0.75
+    # F C Dm Bb: friendly on a ukulele already
+    f_song = [(5, "", 2.0), (0, "", 2.0), (2, "m", 2.0), (10, "", 2.0)]
+    assert easy_fraction(f_song, 0, 0, "ukulele") >= 0.75
+    # a D-tuned ukulele plays the same shapes a whole step higher, so the shapes it needs
+    # for a song in C are the C-tuned ones for a song in B-flat
+    assert easy_fraction([(0, "", 2), (7, "", 2), (9, "m", 2), (5, "", 2)], 0, 0, "ukulele_d") \
+        == easy_fraction([(10, "", 2), (5, "", 2), (7, "m", 2), (3, "", 2)], 0, 0, "ukulele")
+
+
+def test_instrument_changes_the_shapes_shown_and_exported(grid_sheet):
+    from mixpipe.chords.sheet import apply_settings, to_chordpro, to_text, view
+
+    apply_settings(grid_sheet, instrument="ukulele_d")
+    v = view(grid_sheet)
+    # G D C Em sound a whole step above the C-tuned shapes: F C Bb Dm
+    assert [c["display"] for c in v["chords"]] == ["F", "C", "Bb", "Dm"]
+    assert v["display"]["instrument"] == "ukulele_d" and "D tuning" in v["display"]["instrument_label"]
+    assert any(i["id"] == "ukulele" for i in v["display"]["instruments"])
+    assert v["display"]["shape_key_label"] == "F major" and v["display"]["key_label"] == "G major"
+    cho = to_chordpro(grid_sheet)
+    assert "{comment: Instrument: Ukulele, D tuning (ADF♯B)}" in cho and "[Dm]one" in cho
+    txt = to_text(grid_sheet)
+    assert "Instrument: Ukulele, D tuning" in txt and "Play F shapes" in txt
+    apply_settings(grid_sheet, instrument="guitar_half_down", capo=0)
+    assert [c["display"] for c in view(grid_sheet)["chords"]] == ["G#", "D#", "C#", "Fm"] or \
+        [c["display"] for c in view(grid_sheet)["chords"]] == ["Ab", "Eb", "Db", "Fm"]
+    with pytest.raises(ValueError):
+        apply_settings(grid_sheet, instrument="banjo")
+    apply_settings(grid_sheet, instrument="guitar")
+    assert "Instrument:" not in to_text(grid_sheet) and "Play" not in to_text(grid_sheet)
+
+
+def test_api_instrument_setting(tmp_path, progression_audio):
+    from fastapi.testclient import TestClient
+
+    import soundfile as sf
+
+    from mixpipe.web.server import create_app
+
+    buf = io.BytesIO()
+    sf.write(buf, progression_audio, SR, format="WAV")
+    client = TestClient(create_app(tmp_path, separator=fake_separator, transcriber=fake_transcriber,
+                                   run_inline=True))
+    sid = client.post("/api/songs", files=[("files", ("a.wav", buf.getvalue(), "audio/wav"))],
+                      data={"language": "en"}).json()["id"]
+    v = client.patch(f"/api/songs/{sid}/settings", json={"instrument": "ukulele"}).json()
+    assert v["display"]["instrument"] == "ukulele"
+    assert client.patch(f"/api/songs/{sid}/settings", json={"instrument": "lute"}).status_code == 400
+    assert client.get(f"/api/songs/{sid}").json()["display"]["instrument"] == "ukulele"   # persisted
+
+
+# --------------------------------------------------------------------------- #
+# the job queue
+# --------------------------------------------------------------------------- #
+
+import threading  # noqa: E402
+import time  # noqa: E402
+
+
+def _wait_for(cond, timeout=5.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_queue_runs_one_at_a_time_by_default_and_many_when_asked():
+    from mixpipe.web.common import JobQueue
+
+    def run_batch(workers):
+        q = JobQueue(workers)
+        gate = threading.Event()
+        live, peak, lock = [0], [0], threading.Lock()
+
+        def job():
+            with lock:
+                live[0] += 1
+                peak[0] = max(peak[0], live[0])
+            gate.wait(2)
+            with lock:
+                live[0] -= 1
+
+        futures = [q.submit(f"s{i}", job) for i in range(3)]
+        _wait_for(lambda: live[0] >= min(workers, 3))
+        time.sleep(0.05)
+        gate.set()
+        for f in futures:
+            f.result(timeout=5)
+        return peak[0]
+
+    assert run_batch(1) == 1
+    assert run_batch(2) == 2
+
+
+def test_queue_position_and_cancelling():
+    from mixpipe.web.common import JobQueue
+
+    q = JobQueue(1)
+    gate, started, done, dropped = threading.Event(), threading.Event(), [], []
+
+    def slow():
+        started.set()
+        gate.wait(5)
+        done.append("a")
+
+    q.submit("a", slow)
+    started.wait(2)
+    q.submit("b", lambda: done.append("b"), on_cancel=lambda: dropped.append("b"))
+    q.submit("c", lambda: done.append("c"))
+    assert (q.ahead("a"), q.ahead("b"), q.ahead("c")) == (None, 1, 2)     # a is running
+    assert q.cancel("b") == "queued" and q.ahead("c") == 1
+    assert q.cancel("nothing") is None
+    assert q.cancel("a") == "running" and q.is_cancelled("a")
+    gate.set()
+    assert _wait_for(lambda: "c" in done)
+    assert done == ["a", "c"] and dropped == ["b"]                         # b never ran
+    assert not q.is_cancelled("a")                                          # cleared once it ended
+
+
+def test_run_job_reports_cancelled_state(tmp_path):
+    from mixpipe import songstore
+
+    d = tmp_path / "s"
+    d.mkdir()
+    flag = {"stop": False}
+
+    def work(progress):
+        progress("separate", 0.0, "start")
+        flag["stop"] = True
+        progress("separate", 0.5, "still going")        # raises JobCancelled
+        return "unreachable"
+
+    assert songstore.run_job(d, work, "align", cancelled=lambda: flag["stop"]) is None
+    st = songstore.get_status(d)
+    assert st["state"] == "cancelled" and st["stage"] == "separate"
+    assert songstore.run_job(d, lambda p: "ok", "align", cancelled=lambda: True) is None   # before it starts
+    assert songstore.get_status(d)["state"] == "cancelled"
+    assert songstore.run_job(d, lambda p: "ok", "align") == "ok"
+
+
+def _blocking_app(tmp_path, gate, started):
+    from mixpipe.web.server import create_app
+
+    def separator(audio, sr, progress=None):
+        started.set()
+        while not gate.is_set():
+            time.sleep(0.01)
+            if progress:
+                progress(0.1)                          # a progress report is where a cancel lands
+        return fake_separator(audio, sr, progress)
+
+    return create_app(tmp_path, separator=separator, transcriber=fake_transcriber)
+
+
+def test_api_queue_position_and_cancel(tmp_path, progression_audio):
+    from fastapi.testclient import TestClient
+
+    import soundfile as sf
+
+    buf1, buf2 = io.BytesIO(), io.BytesIO()
+    sf.write(buf1, progression_audio, SR, format="WAV")
+    sf.write(buf2, progression_audio[: SR * 20], SR, format="WAV")
+    gate, started = threading.Event(), threading.Event()
+    client = TestClient(_blocking_app(tmp_path, gate, started))
+    try:
+        first = client.post("/api/songs", files=[("files", ("one.wav", buf1.getvalue(), "audio/wav"))],
+                            data={"language": "en"}).json()["id"]
+        assert started.wait(5)
+        second = client.post("/api/songs", files=[("files", ("two.wav", buf2.getvalue(), "audio/wav"))],
+                             data={"language": "en"}).json()["id"]
+        st = client.get(f"/api/songs/{second}/status").json()
+        assert st["state"] == "queued" and st["ahead"] == 1
+        assert client.get(f"/api/songs/{first}/status").json().get("ahead") is None
+
+        r = client.post(f"/api/songs/{second}/cancel").json()
+        assert r["cancelled"] == "queued"
+        assert client.get(f"/api/songs/{second}/status").json()["state"] == "cancelled"
+
+        # cancelling the running job stops it at its next progress report
+        assert client.post(f"/api/songs/{first}/cancel").json()["cancelled"] == "running"
+        assert _wait_for(lambda: client.get(f"/api/songs/{first}/status").json()["state"] == "cancelled")
+        assert client.post(f"/api/songs/{first}/cancel").json()["cancelled"] is None
+        assert client.post("/api/songs/nope/cancel").status_code == 404
+
+        # and it can be started again once the separator is free
+        gate.set()
+        client.post("/api/songs", files=[("files", ("one.wav", buf1.getvalue(), "audio/wav"))],
+                    data={"language": "en", "rerun": "true"})
+        assert _wait_for(lambda: client.get(f"/api/songs/{first}/status").json()["state"] == "done", 20)
+    finally:
+        gate.set()
+
+
+# --------------------------------------------------------------------------- #
+# between the beats: refined change times, pushes, meter sections
+# --------------------------------------------------------------------------- #
+
+from mixpipe.chords import recognize as rec  # noqa: E402
+
+CHORD_NOTES = {"C": ([60, 64, 67], 48), "G": ([59, 62, 67], 43), "Am": ([60, 64, 69], 45),
+               "F": ([60, 65, 69], 41), "Dm": ([62, 65, 69], 50), "Em": ([59, 64, 67], 52),
+               "D": ([62, 66, 69], 50), "A": ([57, 61, 64], 45), "Bm": ([59, 62, 66], 47)}
+
+
+def render_strikes(strikes, total):
+    """strikes: [(time_s, chord, length_s)], each a plucked chord with its bass note."""
+    y = np.zeros(int(total * SR) + SR)
+    for t, name, length in strikes:
+        notes, bass = CHORD_NOTES[name]
+        n = int(length * SR)
+        env = np.exp(-np.arange(n) / (0.35 * SR))
+        hit = (sum(tone(m, n) for m in notes) * 0.25 + tone(bass, n) * 0.4) * env
+        i = int(t * SR)
+        y[i:i + n] += hit[: max(0, len(y) - i)][:n]
+    return (y / np.abs(y).max() * 0.8).astype(np.float32)
+
+
+def pushed_song(push_beats, progression=("C", "G", "Am", "F") * 3):
+    """A chord per 4/4 bar, but each arrives `push_beats` early; eighth-note strums."""
+    ev = []
+    for bar, name in enumerate(progression):
+        start = max(0.0, (bar * 4 - push_beats) * BEAT)
+        ev.append((start, name, 4 * BEAT))
+        ev += [(start + k * BEAT / 2, name, BEAT / 2 + 0.1) for k in range(1, 8)]
+    return render_strikes(ev, len(progression) * 4 * BEAT)
+
+
+def test_metric_beat_and_beat_position():
+    bt = np.array([1.0, 1.5, 2.0, 2.5])
+    assert rec._beat_position(1.75, bt, 0.5) == pytest.approx(1.5)
+    assert rec._beat_position(0.75, bt, 0.5) == pytest.approx(-0.5)         # before the first beat
+    assert rec._beat_position(3.0, bt, 0.5) == pytest.approx(4.0)           # after the last
+    assert rec.metric_beat(2.02) == 2 and rec.metric_beat(2.3) == 2          # on or just after: this beat
+    assert rec.metric_beat(2.5) == 3 and rec.metric_beat(2.9) == 3           # a half beat early: the next
+    assert rec.metric_beat(1.97) == 2                                        # just early: the nearest
+
+
+def test_pushed_chords_are_timed_between_beats_and_bars_follow_the_downbeat():
+    r = recognize(pushed_song(0.5), SR)
+    labels = [s["candidates"][0]["label"] for s in r["segments"]]
+    assert labels[:4] == ["C", "G", "Am", "F"] or labels[:4] == ["C", "G", "Am", "Fmaj7"]
+    true_starts = [max(0.0, (bar * 4 - 0.5) * BEAT) for bar in range(12)]
+    got = [s["start"] for s in r["segments"]]
+    assert len(got) >= 10
+    near = [abs(g - t) for g, t in zip(got, true_starts)]
+    assert np.median(near) < 0.06                      # the changes are found between the beats
+    # the bar lines belong at the beat *after* each push, i.e. t = 2.0, 4.0 ...
+    m = r["meter"]
+    bt = np.array(r["beat_times"])
+    downbeat_times = bt[m["downbeat"]::m["beats_per_bar"]]
+    assert m["beats_per_bar"] == 4
+    assert min(abs(downbeat_times - 4 * BEAT)) < 0.08
+
+
+def test_unpushed_song_keeps_its_downbeat_on_the_chords():
+    r = recognize(pushed_song(0.0), SR)
+    bt = np.array(r["beat_times"])
+    downbeat_times = bt[r["meter"]["downbeat"]::r["meter"]["beats_per_bar"]]
+    assert min(abs(downbeat_times - 4 * BEAT)) < 0.08
+    assert abs(r["segments"][1]["start"] - 4 * BEAT) < 0.06
+
+
+def meter_change_song():
+    ev, t = [], 0.0
+    for name in ("C", "G", "Am", "F", "C", "G", "Am", "F"):
+        for _ in range(4):
+            ev.append((t, name, BEAT))
+            t += BEAT
+    for name in ("C", "F", "G", "C", "Am", "F", "G", "C"):
+        for _ in range(3):
+            ev.append((t, name, BEAT))
+            t += BEAT
+    return render_strikes(ev, t + 0.5), 8 * 4 * BEAT
+
+
+def test_meter_sections_found_in_a_song_that_changes_meter():
+    y, change_time = meter_change_song()
+    r = recognize(y, SR)
+    secs = r["meter"]["sections"]
+    assert [s["beats_per_bar"] for s in secs] == [4, 3]
+    bt = np.array(r["beat_times"])
+    assert abs(bt[secs[1]["beat"]] - change_time) < 0.1            # the 3/4 starts at bar 9
+    assert r["meter"]["time_signature"] == "4/4"                    # the longer... both are 8 bars: first wins
+    starts = [s["start"] for s in r["segments"]]
+    assert abs(starts[8] - change_time) < 0.1 and abs(starts[9] - (change_time + 3 * BEAT)) < 0.1
+
+
+def test_constant_meters_get_no_sections():
+    for beats, pattern in ((4, [1, 2]), (3, [1, 1, 2]), (4, [2])):
+        rng = np.random.default_rng(beats)
+        ev, t, chord, left = [], 0.0, "C", 0
+        for _ in range(20):
+            if left == 0:
+                chord, left = rng.choice(list(CHORD_NOTES)), rng.choice(pattern)
+            left -= 1
+            for _ in range(beats):
+                ev.append((t, chord, BEAT))
+                t += BEAT
+        r = recognize(render_strikes(ev, t + 0.5), SR)
+        assert r["meter"]["sections"] == []
+
+
+def test_meter_sections_unit():
+    acc = np.ones(60)
+    # 8 bars of 4, then 8 bars of 3
+    four, three = [4 * k for k in range(8)], [32 + 3 * k for k in range(8)]
+    secs = rec.meter_sections(four + three, acc, 56, 4)
+    assert [(s["beat"], s["beats_per_bar"]) for s in secs] == [(0, 4), (32, 3)]
+    # one meter all the way: nothing to report
+    assert rec.meter_sections([4 * k for k in range(14)], acc, 56, 4) == []
+    # too little evidence
+    assert rec.meter_sections([0, 4, 8], acc, 12, 4) == []
+    assert rec.meter_sections(four + three, acc, 56, 6) == []        # 6 is not a section meter
+    # a pickup: the first downbeat is before the first tracked beat
+    secs = rec.meter_sections([3 + 4 * k for k in range(8)] + [35 + 3 * k for k in range(8)], acc, 60, 4)
+    assert secs[0]["beat"] == -1 and secs[1]["beat"] == 35      # bars at 3, 7 ... 31, then 4 more to 35
+
+
+def test_bar_grid_with_sections():
+    from mixpipe.chords.align import BarGrid
+
+    g = BarGrid([0.5 * k for k in range(60)], sections=[{"beat": 0, "beats_per_bar": 4},
+                                                       {"beat": 8, "beats_per_bar": 3}])
+    assert [g.bar_start(k) for k in range(5)] == [0.0, 2.0, 4.0, 5.5, 7.0]       # 4,4 beats then 3s
+    assert g.bar_of(1.9) == 0 and g.bar_of(2.0) == 1 and g.bar_of(4.0) == 2 and g.bar_of(5.4) == 2
+    assert g.bar_of(5.5) == 3 and g.bar_of(7.0) == 4
+    assert g.bar_start(-1) == -2.0
+    assert g.section_changes() == [{"bar": 2, "time": 4.0, "beats_per_bar": 3}]
+    # round trip
+    for k in range(10):
+        assert g.bar_of(g.bar_start(k) + 0.01) == k
+    # a short last bar before the next section counts as a bar
+    h = BarGrid([0.5 * k for k in range(40)], sections=[{"beat": 0, "beats_per_bar": 4},
+                                                       {"beat": 6, "beats_per_bar": 4}])
+    assert h.bars_before == [0, 2] and h.bar_start(1) == 2.0 and h.bar_start(2) == 3.0
+    plain = BarGrid([0.5 * k for k in range(20)], beats_per_bar=3, downbeat=1)
+    assert plain.bar_start(0) == 0.5 and plain.bar_start(1) == 2.0 and plain.section_changes() == []
+
+
+def test_chord_bar_credits_a_push_to_the_next_bar():
+    from mixpipe.chords.align import BarGrid
+
+    g = BarGrid([0.5 * k for k in range(40)], beats_per_bar=4)        # bars every 2 s
+    assert g.chord_bar(3.75) == 2 and g.bar_of(3.75) == 1             # an 8th early: written in bar 2
+    assert g.chord_bar(3.5) == 1                                      # a whole beat early: not a push
+    assert g.chord_bar(4.0) == 2 and g.chord_bar(4.1) == 2 and g.chord_bar(3.95) == 2
+
+
+def test_instrumental_bars_place_pushed_chords_in_the_next_bar():
+    chords = [chord("a", "G", 0.0, 3.75), chord("b", "D", 3.75, 7.75), chord("c", "C", 7.75, 12.0)]
+    sheet = {"title": "Push", "key": "G:maj", "tempo": 120.0, "beat_period": 0.5,
+             "beat_times": [0.5 * k for k in range(40)],
+             "meter": {"time_signature": "4/4", "beats_per_bar": 4, "downbeat": 0, "detected": None},
+             "lines": [], "chords": chords}
+    from mixpipe.chords.align import grid_for
+
+    rows = build_rows([], chords, 0.5, grid=grid_for(sheet))
+    bars = rows[0]["bars"]
+    assert [b["chords"] for b in bars] == [["a"], [], ["b"], [], ["c"]] or \
+        [b["chords"] for b in bars][:3] == [["a"], [], ["b"]]
+    pushed = next(b for b in bars if b["chords"] == ["b"])
+    assert pushed["hold"] is None                 # it arrives on the bar, so nothing is "held" into it
+
+
+def test_sections_in_the_sheet(grid_sheet):
+    from mixpipe.chords.sheet import apply_settings, to_chordpro, to_text, view
+
+    grid_sheet["meter"]["sections"] = [{"beat": 0, "beats_per_bar": 4}, {"beat": 8, "beats_per_bar": 3}]
+    grid_sheet["meter"]["detected"] = {"time_signature": "4/4", "beats_per_bar": 4, "downbeat": 0,
+                                       "sections": list(grid_sheet["meter"]["sections"])}
+    v = view(grid_sheet)
+    assert v["display"]["meter_changes"] == [{"bar": 3, "time_signature": "3/4", "time": 4.0}]
+    assert "{time: 3/4}" in to_chordpro(grid_sheet) and "[Time: 3/4]" in to_text(grid_sheet)
+    # a hand-picked time signature replaces the detected changes; reset brings them back
+    apply_settings(grid_sheet, time_signature="3/4")
+    assert grid_sheet["meter"]["sections"] == [] and view(grid_sheet)["display"]["meter_changes"] == []
+    assert "[Time: 3/4]" not in to_text(grid_sheet).replace("Time: 3/4   ", "")
+    apply_settings(grid_sheet, reset_meter=True)
+    assert len(grid_sheet["meter"]["sections"]) == 2
+    # nudging the bar lines slides every section
+    apply_settings(grid_sheet, shift_downbeat=1)
+    assert [s["beat"] for s in grid_sheet["meter"]["sections"]] == [1, 9]
+
+
+# --------------------------------------------------------------------------- #
+# tempo drift, free time, key sensitivity
+# --------------------------------------------------------------------------- #
+
+def drifting_song(periods, progression=("C", "G", "Am", "F")):
+    """One chord per 4 beats; the beat period follows `periods` (seconds)."""
+    bt = np.concatenate([[0.2], 0.2 + np.cumsum(periods)])         # bt[i] is the time of beat i
+    prog = list(progression) * (len(periods) // (4 * len(progression)) + 1)
+    ev = [(t, prog[i // 4], bt[i + 1] - t) for i, t in enumerate(bt[:-1])]
+    return render_strikes(ev, bt[-1] + 0.5), bt
+
+
+def test_beat_sync():
+    onset = np.zeros(400)
+    onset[::20] = 1.0                                             # pulses every 20 frames
+    on_grid = np.arange(0, 400, 20)
+    assert rec.beat_sync(onset, on_grid) == 1.0
+    off_grid = on_grid + 10                                       # half a period off
+    assert rec.beat_sync(onset, off_grid) < 0.2
+    assert rec.beat_sync(np.zeros(400), on_grid) == 1.0           # no onsets: nothing to judge
+    assert rec.beat_sync(onset, on_grid[:3]) == 1.0               # too few beats to judge
+    dense = np.arange(0, 400, 5)                                  # a faster grid with extra beats
+    assert rec.beat_sync(onset, dense) < 0.4                      # beats with no onset count against it
+
+
+@pytest.mark.parametrize("name,periods", [
+    ("accelerando", np.linspace(0.75, 0.30, 40)),
+    ("ritardando", np.linspace(0.40, 0.90, 40)),
+    ("wobble", 0.5 * (1 + 0.25 * np.sin(np.linspace(0, 4 * np.pi, 60)))),
+])
+def test_chord_changes_are_found_through_tempo_drift(name, periods):
+    y, bt = drifting_song(periods)
+    r = recognize(y, SR)
+    starts = np.array([s["start"] for s in r["segments"]])
+    true = [bt[4 * k] for k in range(1, len(periods) // 4)]       # a new chord every 4 beats
+    err = np.array([np.min(np.abs(starts - t)) for t in true])
+    assert err.mean() < 0.08 and err.max() < 0.25
+
+
+def test_free_time_has_boundaries_but_no_grid(monkeypatch):
+    y = pushed_song(0.0)
+    real = rec.choose_beats
+    monkeypatch.setattr(rec, "choose_beats", lambda yy, onset, beats, tempo, n: (
+        rec._pseudo_beats(onset, n), 0.0, True))
+    r = recognize(y, SR)
+    assert r["beat_times"] == [] and r["tempo"] == 0.0
+    assert r["meter"]["free_time"] is True and r["meter"]["sections"] == []
+    labels = [s["candidates"][0]["label"] for s in r["segments"]]
+    assert labels[:3] == ["C", "G", "Am"]                         # the chords themselves still come out
+    monkeypatch.setattr(rec, "choose_beats", real)
+
+
+def test_choose_beats_prefers_a_better_tracker_and_can_give_up(monkeypatch):
+    y = pushed_song(0.0)
+    onset = np.ones(2000)
+    beats = np.arange(10, 1000, 20)
+    # a grid that keeps up with the music is returned untouched
+    monkeypatch.setattr(rec, "beat_sync", lambda o, b: 0.97)
+    out = rec.choose_beats(y, onset, beats, 120.0, 2000)
+    assert out[0] is beats and out[2] is False
+    # nothing keeps up: segment boundaries from onsets, no tempo
+    monkeypatch.setattr(rec, "beat_sync", lambda o, b: 0.2)
+    peaks = np.zeros(2000)
+    peaks[::40] = 5.0
+    b, tempo, free = rec.choose_beats(y, peaks, beats, 120.0, 2000)
+    assert free is True and tempo == 0.0 and len(b) >= 4
+    assert np.all(np.diff(b) >= int(round(rec.MIN_PSEUDO_BEAT_S * rec.SR / rec.HOP)))
+
+
+def test_key_sensitivity_modes():
+    def song(mod_bars):
+        seq = ["C", "G", "Am", "F"] * 3 + ["D", "A", "Bm", "G"][:mod_bars] + ["C", "G", "Am", "F"] * 3
+        ev, t = [], 0.0
+        for name in seq:
+            for _ in range(4):
+                ev.append((t, name, BEAT))
+                t += BEAT
+        return render_strikes(ev, t + 0.5)
+
+    y = song(3)
+    normal = recognize(y, SR)
+    sensitive = recognize(y, SR, key_sensitivity="sensitive")
+    assert len(normal["key_regions"]) == 1 and normal["key"] == "C:maj"
+    keys = [k["key"] for k in sensitive["key_regions"]]
+    assert len(keys) == 3 and keys[0] == keys[-1] == "C:maj" and keys[1] != "C:maj"
+    # a song that stays put is left alone in both modes
+    ev, t = [], 0.0
+    for name in ["C", "G", "Am", "F", "Dm", "G", "C", "Em", "Am", "F", "G", "C"] * 3:
+        for _ in range(4):
+            ev.append((t, name, BEAT))
+            t += BEAT
+    steady = render_strikes(ev, t + 0.5)
+    assert len(recognize(steady, SR, key_sensitivity="sensitive")["key_regions"]) == 1
+    assert recognize(y, SR, key_sensitivity="bogus")["key_regions"] == normal["key_regions"]
+
+
+def test_api_key_changes_option_reaches_the_recognizer(tmp_path, progression_audio):
+    from fastapi.testclient import TestClient
+
+    import soundfile as sf
+
+    from mixpipe.web.server import parse_options, create_app
+
+    assert parse_options({})["key_changes"] == "normal"
+    assert parse_options({"key_changes": "sensitive"})["key_changes"] == "sensitive"
+    assert parse_options({"key_changes": "wild"})["key_changes"] == "normal"
+    buf = io.BytesIO()
+    sf.write(buf, progression_audio, SR, format="WAV")
+    client = TestClient(create_app(tmp_path, separator=fake_separator, transcriber=fake_transcriber,
+                                   run_inline=True))
+    sid = client.post("/api/songs", files=[("files", ("a.wav", buf.getvalue(), "audio/wav"))],
+                      data={"language": "en", "key_changes": "sensitive"}).json()["id"]
+    assert json.loads((tmp_path / sid / "chords.json").read_text())["key_changes"] == "sensitive"

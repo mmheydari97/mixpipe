@@ -19,6 +19,10 @@
 .word { cursor: pointer; border-radius: 4px; padding: 0 1px; }
 .word:hover { background: var(--surface-2); }
 .word.active { background: var(--active); }
+.wordgroup { display: inline-flex; align-items: flex-end; }
+.wordgroup > .cell.syl + .cell.syl { margin-inline-start: -1px; }   /* syllables read as one word */
+.wordgroup.active .word { background: var(--active); }
+.word.part { padding: 0; }
 .word.approx { text-decoration: underline dotted var(--muted); text-underline-offset: 4px; }
 .line.instrumental { align-items: center; gap: 6px; }
 .line.instrumental .tag { font-size: .75em; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-inline-end: 6px; }
@@ -53,6 +57,12 @@
 .harp-head .meta { margin: 0; }
 .legend { font-size: .9em; color: var(--muted); }
 .legend b { font-family: var(--mono); color: var(--chord); }
+.suggest { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin: -4px 0 12px; font-size: .9em; }
+.suggest .lbl { color: var(--muted); }
+.suggest button { padding: 3px 9px; font-size: .95em; }
+.suggest button b { font-family: var(--mono); color: var(--chord); }
+.suggest button.on { background: var(--accent-soft); border-color: var(--chord); }
+.suggest button small { color: var(--muted); margin-left: 4px; }
 .chip.note { display: inline-flex; flex-direction: column; align-items: center; line-height: 1.15; padding: 2px 4px; }
 .chip.note .nm { font-weight: 700; }
 .chip.note .tb { font-weight: 500; font-size: .92em; color: var(--text); }
@@ -122,21 +132,6 @@
 .chord-menu .foot { display: flex; gap: 6px; padding: 6px 3px 2px; }
 .chord-menu .foot button { flex: 1; justify-content: center; font-size: .85em; }
 .chord-menu .hint { color: var(--muted); font-size: .8em; padding: 2px 6px; }
-
-/* ---------- model picker ---------- */
-.picker { position: relative; }
-.picker-list {
-  position: absolute; z-index: 40; left: 0; right: 0; top: calc(100% + 4px); max-height: 320px; overflow: auto;
-  list-style: none; margin: 0; padding: 4px; background: var(--surface);
-  border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
-}
-.picker-list li { padding: 6px 8px; border-radius: 6px; cursor: pointer; display: grid; gap: 2px; }
-.picker-list li.hl, .picker-list li:hover { background: var(--accent-soft); }
-.picker-list li.hint { cursor: default; color: var(--warn); background: transparent; font-size: .85em; }
-.picker-list .row1 { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.picker-list .id { font-family: var(--mono); font-size: .78em; color: var(--muted); }
-.picker-selected { font-size: .85em; color: var(--muted); margin-top: 4px; }
-.picker-selected b { font-family: var(--mono); color: var(--text); }
 
 /* ---------- polish dialog ---------- */
 dialog { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 0; width: min(720px, calc(100vw - 32px)); box-shadow: var(--shadow); }

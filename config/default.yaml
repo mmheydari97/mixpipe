@@ -7,6 +7,10 @@
 
 cleanup:
   remove_dc: true
+  dehum: auto                # auto | 50 | 60 | false. auto notches 50/60 Hz hum only when it finds it
+  declick: false             # median-outlier click repair; turn on for a take with pops
+  declick_threshold: 8.0     # robust sigmas; lower catches quieter clicks, more false positives
+  declick_max_ms: 2.0        # longer runs are treated as music (pick attacks, drums), not clicks
   denoise: true
   denoise_strength: 0.6      # 0.0 off .. 1.0 aggressive (artifacts above ~0.8)
   noise_profile_ms: 400      # leading silence sampled as the noise profile
@@ -19,6 +23,7 @@ cleanup:
 mixdown:
   headroom_db: -6.0          # pre-master bus peak; leave room for the limiter
   bus_comp_enabled: true
+  keep_stereo: true          # stereo stems keep their width (pan = balance); false folds all to mono
 
 master:
   target_lufs: -14.0         # -14 streaming, -16 podcast-ish, -9 loud/aggressive
@@ -26,6 +31,15 @@ master:
   master_hpf_hz: 25.0
   limiter_lookahead_ms: 5.0
   limiter_release_ms: 60.0
+  true_peak: true            # limiter sees inter-sample peaks too (dBTP), not just sample peaks
+  reference_strength: 0.8    # 0..1, how far --reference pulls the tonal balance
+  multiband:                 # three-band compression ahead of the glue comp (off by default)
+    enabled: false
+    crossovers: [150.0, 4000.0]
+    bands:
+      - {threshold_db: -18.0, ratio: 2.0, attack_ms: 30.0, release_ms: 180.0, makeup_db: 0.0}
+      - {threshold_db: -16.0, ratio: 1.8, attack_ms: 15.0, release_ms: 120.0, makeup_db: 0.0}
+      - {threshold_db: -20.0, ratio: 1.8, attack_ms: 5.0, release_ms: 80.0, makeup_db: 0.0}
   master_eq:
     - {freq: 120.0, gain_db: 0.5, q: 0.7}
     - {freq: 10000.0, gain_db: 1.0, q: 0.6}
@@ -40,6 +54,7 @@ advisor:
   mode: rules                # rules | llm | none
   provider: anthropic        # anthropic | openrouter
   model: claude-sonnet-4-6
+  openrouter_model: anthropic/claude-haiku-5.5   # chat turns when only OPENROUTER_API_KEY is set
   max_gain_db: 12.0
   max_eq_gain_db: 9.0
 

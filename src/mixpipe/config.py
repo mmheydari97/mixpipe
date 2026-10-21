@@ -45,6 +45,9 @@ ROLES: dict[str, str] = {
     "drum": "drums",
     "perc": "drums",
     "click": "drums",
+    # the six Demucs stems from the splitter (vocals / guitar / drums / bass / piano / other)
+    "guitar": "electric",
+    "other": "keys",
 }
 
 
@@ -58,6 +61,10 @@ ROLES: dict[str, str] = {
 #   comp        : {threshold_db, ratio, attack_ms, release_ms, makeup_db}
 #   pan         : -1 hard left .. 0 centre .. +1 hard right
 #   target_lufs : desired stem loudness before the bus (advisory)
+#   sends       : level (dB, -60 = off) of this stem into the shared reverb and
+#                 delay buses; the buses are set up under DEFAULT_CONFIG["sends"]
+#   deess       : split-band sibilance control {freq_hz, max_reduction_db}; 0 = off
+#   transient   : attack / sustain shaping, each -1 (softer) .. +1 (punchier)
 ROLE_TREATMENTS: dict[str, dict] = {
     "acoustic": {
         "gain_db": 0.0,
@@ -72,6 +79,9 @@ ROLE_TREATMENTS: dict[str, dict] = {
                  "release_ms": 180.0, "makeup_db": 2.0},
         "pan": -0.35,
         "target_lufs": -18.0,
+        "sends": {"reverb_db": -18.0, "delay_db": -60.0},
+        "deess": {"freq_hz": 6500.0, "max_reduction_db": 0.0},
+        "transient": {"attack": 0.2, "sustain": 0.0},   # a little pick definition
     },
     "electric": {
         "gain_db": 0.0,
@@ -85,6 +95,9 @@ ROLE_TREATMENTS: dict[str, dict] = {
                  "release_ms": 150.0, "makeup_db": 2.0},
         "pan": 0.35,
         "target_lufs": -18.0,
+        "sends": {"reverb_db": -20.0, "delay_db": -60.0},
+        "deess": {"freq_hz": 6500.0, "max_reduction_db": 0.0},
+        "transient": {"attack": 0.0, "sustain": 0.0},
     },
     "electric_lead": {
         "gain_db": 0.0,
@@ -98,6 +111,9 @@ ROLE_TREATMENTS: dict[str, dict] = {
                  "release_ms": 120.0, "makeup_db": 2.5},
         "pan": 0.15,
         "target_lufs": -16.0,
+        "sends": {"reverb_db": -16.0, "delay_db": -22.0},
+        "deess": {"freq_hz": 6500.0, "max_reduction_db": 0.0},
+        "transient": {"attack": 0.0, "sustain": 0.0},
     },
     "harmonica": {
         # Harmonica lives right where vocals and lead guitar do, and it has a
@@ -114,6 +130,9 @@ ROLE_TREATMENTS: dict[str, dict] = {
                  "release_ms": 100.0, "makeup_db": 3.0},
         "pan": 0.0,
         "target_lufs": -18.0,
+        "sends": {"reverb_db": -16.0, "delay_db": -24.0},
+        "deess": {"freq_hz": 6500.0, "max_reduction_db": 0.0},
+        "transient": {"attack": 0.0, "sustain": 0.0},
     },
     "keys": {
         "gain_db": -2.0,
@@ -124,6 +143,9 @@ ROLE_TREATMENTS: dict[str, dict] = {
                  "release_ms": 250.0, "makeup_db": 1.0},
         "pan": 0.0,
         "target_lufs": -20.0,
+        "sends": {"reverb_db": -20.0, "delay_db": -60.0},
+        "deess": {"freq_hz": 6500.0, "max_reduction_db": 0.0},
+        "transient": {"attack": 0.0, "sustain": 0.0},
     },
     "bass": {
         "gain_db": 0.0,
@@ -137,6 +159,9 @@ ROLE_TREATMENTS: dict[str, dict] = {
                  "release_ms": 120.0, "makeup_db": 2.5},
         "pan": 0.0,
         "target_lufs": -17.0,
+        "sends": {"reverb_db": -60.0, "delay_db": -60.0},
+        "deess": {"freq_hz": 6500.0, "max_reduction_db": 0.0},
+        "transient": {"attack": 0.0, "sustain": 0.0},
     },
     "vocal": {
         "gain_db": 0.0,
@@ -145,12 +170,14 @@ ROLE_TREATMENTS: dict[str, dict] = {
         "eq": [
             {"freq": 250.0, "gain_db": -1.5, "q": 0.9},
             {"freq": 3200.0, "gain_db": 2.0, "q": 0.8},
-            {"freq": 7000.0, "gain_db": -2.0, "q": 2.0},   # crude de-ess
         ],
         "comp": {"threshold_db": -16.0, "ratio": 3.5, "attack_ms": 8.0,
                  "release_ms": 120.0, "makeup_db": 3.0},
         "pan": 0.0,
         "target_lufs": -15.0,
+        "sends": {"reverb_db": -14.0, "delay_db": -20.0},
+        "deess": {"freq_hz": 6500.0, "max_reduction_db": 6.0},
+        "transient": {"attack": 0.0, "sustain": 0.0},
     },
     "drums": {
         "gain_db": 0.0,
@@ -161,6 +188,9 @@ ROLE_TREATMENTS: dict[str, dict] = {
                  "release_ms": 100.0, "makeup_db": 2.0},
         "pan": 0.0,
         "target_lufs": -14.0,
+        "sends": {"reverb_db": -22.0, "delay_db": -60.0},
+        "deess": {"freq_hz": 6500.0, "max_reduction_db": 0.0},
+        "transient": {"attack": 0.0, "sustain": 0.0},
     },
     "default": {
         "gain_db": 0.0,
@@ -171,6 +201,9 @@ ROLE_TREATMENTS: dict[str, dict] = {
                  "release_ms": 180.0, "makeup_db": 1.0},
         "pan": 0.0,
         "target_lufs": -18.0,
+        "sends": {"reverb_db": -20.0, "delay_db": -60.0},
+        "deess": {"freq_hz": 6500.0, "max_reduction_db": 0.0},
+        "transient": {"attack": 0.0, "sustain": 0.0},
     },
 }
 
@@ -180,6 +213,10 @@ DEFAULT_CONFIG: dict = {
     "treatments": ROLE_TREATMENTS,
     "cleanup": {
         "remove_dc": True,
+        "dehum": "auto",           # auto | 50 | 60 | false. Notches mains hum only when found
+        "declick": False,          # median-outlier click repair; off until you need it
+        "declick_threshold": 8.0,  # robust sigmas; lower catches quieter clicks
+        "declick_max_ms": 2.0,     # runs longer than this are treated as music, not clicks
         "denoise": True,
         "denoise_strength": 0.6,   # 0 = off, 1 = aggressive
         "noise_profile_ms": 400,   # leading silence used as the noise sample
@@ -199,17 +236,50 @@ DEFAULT_CONFIG: dict = {
             {"freq": 10000.0, "gain_db": 1.0, "q": 0.6},
         ],
         "master_hpf_hz": 25.0,
+        # Three-band compression ahead of the glue comp. Off by default: the
+        # single-band glue comp is enough for most mixes; turn this on when the
+        # low end pumps the whole bus or the top end gets harsh when it's loud.
+        "multiband": {
+            "enabled": False,
+            "crossovers": [150.0, 4000.0],
+            "bands": [
+                {"threshold_db": -18.0, "ratio": 2.0, "attack_ms": 30.0,
+                 "release_ms": 180.0, "makeup_db": 0.0},
+                {"threshold_db": -16.0, "ratio": 1.8, "attack_ms": 15.0,
+                 "release_ms": 120.0, "makeup_db": 0.0},
+                {"threshold_db": -20.0, "ratio": 1.8, "attack_ms": 5.0,
+                 "release_ms": 80.0, "makeup_db": 0.0},
+            ],
+        },
         "limiter_lookahead_ms": 5.0,
+        "true_peak": True,         # limiter watches 4x-oversampled (inter-sample) peaks
+        "reference_strength": 0.8, # how far a --reference pulls the tonal balance
         "limiter_release_ms": 60.0,
     },
     "mixdown": {
         "headroom_db": -6.0,       # pre-master bus peak target
         "bus_comp_enabled": True,
+        # stereo files stay stereo (pan becomes balance); false folds every stem to mono.
+        # A "stereo" file whose two sides are the same is folded either way.
+        "keep_stereo": True,
+    },
+    # Shared effect buses. Every stem feeds them at its own send level (see the
+    # role treatments); each bus runs once on the summed sends and its return is
+    # added to the dry bus. A mix of close-miked dry sources needs this shared
+    # space to sound like one performance.
+    "sends": {
+        "enabled": True,
+        "reverb": {"room_size": 0.5, "decay_s": 1.4, "damping": 0.45,
+                   "pre_delay_ms": 18.0, "width": 1.0, "return_db": -3.0},
+        "delay": {"delay_ms": 120.0, "feedback": 0.25, "damping": 0.35,
+                  "return_db": -6.0},
     },
     "advisor": {
         "mode": "rules",           # rules | llm | none
         "provider": "anthropic",   # anthropic | openrouter
         "model": "claude-sonnet-4-6",
+        # used for chat turns when only OPENROUTER_API_KEY is set (fast and cheap)
+        "openrouter_model": "anthropic/claude-haiku-5.5",
         "max_gain_db": 12.0,       # plan clamps
         "max_eq_gain_db": 9.0,
     },

@@ -1,88 +1,125 @@
 # Outstanding work
 
-Every stub below is safe to call - it returns its input unchanged or an empty
-result, so the pipeline runs end to end today. Grep for `# TODO` to find them.
+Three apps share this repository. Items are grouped by the app they belong to.
 
-## High value, low effort
+| App | What it is | Section |
+|---|---|---|
+| **Mixer** | stems in, mixed and mastered WAV out (`mixpipe.cli mix`), or by chat (`mix-ui`, `chat`) | [Mixer](#mixer) |
+| **Chord finder** | song to chord sheet, plus the **harmonica tab** (`chords-ui`) | [Chord finder](#chord-finder), [Harmonica](#harmonica) |
+| **Stem splitter** | song to six stems, practice mixer (`split-ui`) | [Stem splitter](#stem-splitter) |
 
-- **`master.match_reference()`** - match the tonal balance of a commercial
-  reference track. Biggest single quality jump available. Easiest path is to
-  shell out to `matchering` rather than implement it.
-- **`reverb.slap_delay()`** and **`reverb.algorithmic_reverb()`** - four dry
-  close-miked sources need shared space or the mix sounds pasted together.
-  Freeverb topology is a couple of hours of work.
-- **`cleanup.dehum()`** - notch cascade at 50/60 Hz harmonics. Trivial with
-  `scipy.signal.iirnotch`, and single-coil electric guitar will need it.
+Shared code (`songstore.py`, `fetch.py`, `openrouter.py`, `web/common.py`) is listed under the app that runs into the limit first.
 
-## High value, real effort
+Every `# TODO` stub that used to be in the mixer has been implemented and tested.
+`grep -rn "TODO" src` finds none.
 
-- **`timing.estimate_offset_samples()` / `align_stems()`** - correlate onset
-  envelopes, apply integer-sample shifts. Needed if takes were recorded in
-  separate passes rather than against a click.
-- **`eq.dynamic_eq()`** and **`eq.deesser()`** - split-band compression via a
-  Linkwitz-Riley crossover. Unlocks a real de-esser and resonance control.
-  The static notch currently in the vocal role treatment is a placeholder.
-- **`advisor.critique_mix()`** - second LLM pass: analyse the *output*, compare
-  against the plan that produced it and a reference track, return a revised
-  plan. This is the iteration loop that would make the tool genuinely useful.
-- **`dynamics.multiband_compress()`** - for the master bus.
-- **`dynamics.transient_shaper()`** - two envelope followers at different time
-  constants; their difference isolates transients.
+---
 
-## Hard, consider not doing yourself
+## Mixer
 
-- **`pitch.py`** (all but `detect_key`) - pitch tracking plus formant-preserving shifting.
-  pYIN for detection, WORLD or PSOLA for shifting. Doing this badly sounds worse
-  than not doing it. `pyworld` / `pyrubberband` are the pragmatic wrappers.
-- **`render_midi.py`** - FluidSynth wrapper, plus MPE-aware rendering for the
-  Seaboard. Practical workaround: bounce audio out of Equator and skip MIDI.
-- **`cleanup.declick()`** - median-filter outlier detection is easy to write and
-  hard to tune without false-positiving on pick attacks.
-- **`panning.haas_spread()`** - works but comb-filters in mono. Wants an
-  all-pass decorrelator instead.
+Nothing is stubbed any more. What is left are limits of what exists:
 
-## Known limitations of what IS implemented
-
-- The limiter is sample-peak, not true-peak (no oversampling). Inter-sample
-  peaks can exceed the ceiling after lossy encoding. Keep the ceiling at -1 dB.
-- Without `pyloudnorm`, "LUFS" values are RMS approximations with a fixed
-  offset. Fine for relative balancing, not a real loudness measurement.
-- `analysis.masking_report()` is a crude band-overlap check with no temporal
-  weighting, so it flags pairs that never actually play at the same time.
-- `_smooth_gain` and the limiter's release loop are per-sample Python loops.
-  Fine for a few minutes of audio, slow for an album. Vectorize or move to
-  numba/Cython if it becomes a problem.
-- The rule-based advisor does nothing with `--notes`; only the LLM advisor reads
-  them.
+- **Pitch correction is for one note at a time.** It tracks f0 and re-spaces
+  pitch-synchronous grains (TD-PSOLA), which keeps a voice's formants. It cannot
+  retune chords; use `pitch.shift_semitones`, which moves everything together.
+  The built-in phase vocoder behind that is good, not Rubber Band good; with the
+  `rubberband` binary installed it is used automatically.
+- **`render_midi`** needs the `fluidsynth` binary and a SoundFont. MPE is handled
+  by restoring each channel's instrument and +/-48 semitone bend range; slide and
+  pressure only do what FluidSynth's default modulators map them to. It was tested
+  against a fake `fluidsynth`, not a real one (not installed here).
+- **The limiter** is true-peak aware (4x oversampled, checked after limiting) but
+  still a plain lookahead design. Fine for demos, not a mastering-grade limiter.
+- **Without `pyloudnorm`**, "LUFS" values are RMS approximations with a fixed offset.
+- **`declick`** is off by default (`cleanup.declick: true` to use it). It only touches
+  runs shorter than 2 ms, so a click longer than that is left alone on purpose.
+- **Dehum** needs two clear harmonics in the lowest four to act; a hum with a
+  single visible line is treated as a note and left alone.
+- **`--notes` in the rules advisor** is keyword-based (instrument + direction, space,
+  tone words). It reports what it did not understand; anything subtler needs
+  `--advisor llm`.
+- **The critique loop** (`--iterate`) can only fix what it can measure: tonal
+  balance against a reference, true peak, limiter squash, mono compatibility. Without
+  a `--reference` it does not judge taste.
+- **Multiband compression** exists but is off by default (`master.multiband.enabled`).
+- Time alignment assumes the stems share the same material or rhythm. Stems with
+  no onsets, or an unclear correlation (under 6 sigma), are never moved. Among
+  correlation peaks nearly as tall as the best one, the smallest shift wins, because
+  rhythmic parts also line up a whole beat away. An offset is found to within about
+  3 ms between different instruments (37 ms found as 40 ms); it is exact to the
+  sample only when two stems carry the same source.
+- **Mix by chat** (`mix-ui`, `chat`) changes what the plan can express, judged from
+  measurements, never by listening. Asked for something with no parameter ("like
+  the eighties"), the model says so; the keyword fallback lists what it didn't
+  understand. Sessions live in the server's memory: restarting `mix-ui` keeps the
+  rendered versions on disk (`out/mixer/<id>/versions/`, with `session.json`) but
+  doesn't reload them as sessions.
+- **Stereo stems** keep their image; pan on them is a balance control, and there is no
+  per-stem width setting in the plan yet (`panning.width` exists).
+- **Separated stems** are not raw takes: the rules advisor's "noisy take" SNR reading
+  is really their dynamic range, so its high-pass raise is limited to top-line
+  instruments (never bass, drums or keys). Stems with no music in them (a "bass" stem
+  of a song without bass) are marked `silent` and never boosted by an advisor.
+- **Verification** (`scripts/verify_mix.py`, `tests/test_session_e2e.py`) measures what
+  can be measured: true peak, loudness, mono compatibility, the 16-bit grid, the reverb
+  tail, the critique's balance error, and on the synthetic session the hum, clicks,
+  bass offset and sibilance before and after. Whether a mix sounds good is still
+  something to judge by ear.
 
 ## Chord finder
 
-- **Accuracy.** Template + HMM recognisers get roughly 65-75% top-1 on real pop
-  recordings, less on the extended qualities and on dense or heavily distorted
-  arrangements. The candidate dropdown covers a lot of it; a trained model (BTC,
-  or a CRNN on CQT) behind the same `recognize()` contract is the real fix.
-- **Time signature** (2/4, 3/4, 4/4, 6/8) is a best guess from where chord
-  changes and accents fall, plus whether beats split in 2s or 3s. 2/4 vs 4/4 is
-  inherently ambiguous (4/4 wins ties). One time signature per song.
-- **Bar lines can sit a beat off** when a song's chords habitually change just
-  before "1" (a push). The UI's "Bar lines ◀ 1 beat / 1 beat ▶" fixes it.
-- **Key changes** are tracked per chord over ~8-bar windows, so a modulation
-  shorter than ~4 bars (a borrowed chord, a quick tonicisation) is deliberately
-  ignored, and relative major/minor moves are not counted as key changes.
-- **Tempo drift / rubato.** librosa's tracker assumes a roughly steady tempo; free
-  time falls back to fixed 0.5 s frames.
-- **Lyric timing from Whisper** is word-level but not syllable-level, so a chord
-  change in the middle of a long held word shows on that word, not the syllable.
-- **OpenRouter transcription** only returns word timing from OpenAI-compatible
-  upstreams; others are flagged "timing approximate". A local forced-alignment
-  pass (wav2vec2) would fix positions for any text source.
-- **Capo suggestions are guitar-only** and use a fixed list of open shapes
-  (F and Bm count half). No ukulele / alternate tunings.
-- **One job at a time.** The worker is a single thread; fine for a personal tool.
-- **Harmonica melody** is pYIN on the Demucs vocal stem. Breathy, harmonised or
-  heavily processed vocals give wrong or jittery notes, fast runs and grace notes
-  under 0.1 s are dropped, and an octave error is only fixed when the neighbouring
-  notes make it obvious. Where nobody sings, the notes are a rough single-pitch
-  guess on the polyphonic instrument stem (shown faded). Notes can't be merged,
-  split or added yet: only re-picked, retyped or removed. Only the 12-hole C
-  chromatic in solo tuning is modelled.
+- **Accuracy is not measured here.** There is no labelled recording in the repo to
+  benchmark on. The standard recognizer (chroma templates + HMM) is documented at
+  roughly 65-75% top-1 on real pop; the optional **neural** option adds the
+  pretrained BTC transformer and blends its probabilities with the templates
+  (`--recognizer neural`, ~12 MB download once). It works on real music (checked on the
+  BTC authors' example track) but whether the blend beats the templates on your
+  songs is something to judge by ear; BTC has no inversion labels, so slash chords
+  still come from the bass analysis.
+- **2/4 vs 4/4** is musically ambiguous (4/4 wins ties); the Time selector overrides it.
+- **Meter changes** are found among 2, 3 and 4 tracked beats per bar (a 5/4 song comes
+  out as alternating 3 and 2). 6/8 songs get no section search. A hand-picked time
+  signature replaces detected sections; "reset" brings them back. Sections can't be
+  edited individually.
+- **Pushes** (chords arriving a half beat early) are handled at half-beat precision;
+  a sixteenth-note anticipation counts as on the beat.
+- **Key changes** need ~8 bars to be noticed ("normal") or 3-4 ("sensitive", opt-in).
+  The key read from a short excursion is ambiguous (D A Bm G fits D, A and G major).
+  Moves between a major key and its relative minor are never counted.
+- **Free time.** If the beat tracker cannot follow the music even after trying a looser
+  and a windowed tracker, the chords are still found from the harmony alone, but
+  there is no beat grid: no BPM, no bar lines.
+- **Syllables** come from rules (vowel groups, English silent e and -ed, per-character for
+  Chinese / Japanese / Korean). Persian and Arabic words are not split. Boundaries
+  follow the vocal's loudness dips when the vocal stem was available.
+- **Text-only transcription models:** word times are re-derived locally (matched against a
+  local Whisper pass, else snapped to sung onsets). Without a local Whisper and
+  with a vocal that has no clear onsets they stay estimated and are flagged "approx".
+- **Capo / shape tables** are hand-made for guitar, ukulele (C and D tuning), baritone
+  ukulele and guitars tuned down. No banjo, mandolin, open tunings, or custom shapes.
+- **Queue:** one job at a time by default (`--workers N` for more). A running job can be
+  cancelled but stops at its next progress report, so a long model call finishes first.
+
+## Harmonica
+
+- **Instruments modelled:** 12-hole chromatic (solo tuning) and 10-hole Richter diatonic,
+  both in all 12 keys. Not modelled: overblows and overdraws (so a few semitones, such
+  as E-flat in the low octave of a C harp, are unplayable on the diatonic), other
+  tunings (country, Paddy Richter, natural minor), tremolo and octave harps, low
+  and high variants beyond the key's octave.
+- **Melody** is pYIN on the Demucs vocal stem, with a second range-clamped pass when it
+  wanders. Breathy, harmonised or heavily processed vocals still give jittery notes,
+  and an octave error is only fixed when the neighbouring notes make it obvious.
+  "Fast notes" keeps grace notes down to ~60 ms but can add false notes.
+- **Where nobody sings,** the notes come from a harmonic-salience tracker on the
+  instrument stem (shown faded). It follows a lead over chords well in a clean mix;
+  a loud residual bass or a dense arrangement degrades it.
+- Notes can be re-picked, retyped, removed, split, merged and added. The tab is a
+  fingering for the melody only, not an arrangement with chords.
+
+## Stem splitter
+
+Nothing tracked. Its limits are the separation model's (Demucs `htdemucs_6s`: acoustic
+guitar often lands in *Other*, keys is the weakest stem) and are described in
+[`src/mixpipe/splitter/README.md`](src/mixpipe/splitter/README.md#what-to-expect-from-the-separation).
+It shares the job queue (`--workers`, cancel) with the chord finder.

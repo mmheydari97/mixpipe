@@ -1,4 +1,4 @@
-.PHONY: install install-chords stems analyze mix mix-llm chords chords-ui split split-ui test clean
+.PHONY: install install-chords stems demo-session verify-mix analyze mix mix-llm chat mix-ui chords chords-ui split split-ui test clean
 
 # Use the project venv when there is one, so targets work without activating it.
 PY := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
@@ -11,11 +11,26 @@ ARGS ?=
 install:
 	$(PIP) -r requirements.txt
 
-install-chords:
+install-chat:
+	$(RUN) -m mixpipe.cli chat --stems $(or $(STEMS),stems/) $(ARGS)
+
+mix-ui:
+	$(RUN) -m mixpipe.cli mix-ui $(ARGS)
+
+chords:
 	$(PIP) -r requirements.txt -r requirements-chords.txt
 
 stems:
 	$(RUN) scripts/make_test_stems.py
+
+# eight synthetic stems with deliberate flaws (hum, clicks, sibilance, a late bass)
+demo-session:
+	$(RUN) scripts/make_demo_session.py --out stems_demo/
+
+# run every mixer feature on a stems folder and check the result, e.g.
+# make verify-mix STEMS=out/splitter/<id>/stems ARGS="--start 60 --duration 45"
+verify-mix:
+	$(RUN) scripts/verify_mix.py $(or $(STEMS),stems_demo/) $(ARGS)
 
 analyze:
 	$(RUN) -m mixpipe.cli analyze --stems stems/

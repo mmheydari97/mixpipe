@@ -94,7 +94,9 @@ def split(song_dir: str | Path, progress: Progress | None = None,
     return info
 
 
-def run_job(song_dir: Path, options: dict | None = None, **kwargs) -> dict | None:
-    """split() with status.json bookkeeping; never raises."""
+def run_job(song_dir: Path, options: dict | None = None, cancelled=None,
+            **kwargs) -> dict | None:
+    """split() with status.json bookkeeping; never raises. `cancelled()` stops the
+    job at its next progress report."""
     return songstore.run_job(song_dir, lambda progress: split(song_dir, progress, **kwargs),
-                             done_stage="separate")
+                             done_stage="separate", cancelled=cancelled)

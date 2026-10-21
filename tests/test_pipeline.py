@@ -354,8 +354,8 @@ def test_muted_stem_is_excluded():
     assert any("harmonica" in w for w in report["warnings"])
 
 
-def test_stub_modules_do_not_crash_the_pipeline():
-    """The # TODO stubs must be safe to call, not landmines."""
+def test_former_stubs_are_safe_to_call():
+    """Smoke test: every function that used to be a # TODO stub runs and returns audio."""
     from mixpipe import pitch, timing, reverb
     from mixpipe.eq import deesser, dynamic_eq
     from mixpipe.dynamics import multiband_compress, transient_shaper

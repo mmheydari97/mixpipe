@@ -7,7 +7,8 @@ sheet.json is the source of truth for one song:
    "tempo", "beat_period", "beat_times",
    "meter": {"time_signature", "beats_per_bar", "downbeat", "detected": {...}},
    "transpose": 0, "capo": 0,
-   "transcript": {"backend", "model", "language", "timing"},
+   "recognizer": "template" | "btc",
+   "transcript": {"backend", "model", "language", "timing", "retimed"},
    "lines":  [{"words": [{"text", "start", "end", "approx"?}], "gap_before"}],
    "chords": [{"id", "start", "end", "beats", "candidates", "selected", "custom"}],
    "melody": {"octave": 0, "notes": [{"id", "start", "end", "candidates": [{"label",
@@ -33,8 +34,10 @@ from pathlib import Path
 
 from .align import build_rows, chord_label, grid_for
 from .harmonica import MAX_OCTAVE, harmonica_view
-from .theory import (TIME_SIGNATURES, easy_fraction, key_label, key_names, key_short,
-                     parse_label, suggest_capo, transpose_label)
+from .syllables import make_syllabifier
+from .theory import (DEFAULT_INSTRUMENT, INSTRUMENTS, TIME_SIGNATURES, easy_fraction,
+                     instrument_choices, key_label, key_names, key_short, parse_label,
+                     suggest_capo, transpose_label)
 
 SHEET_VERSION = 3
 TS_CHOICES = ("2/4", "3/4", "4/4", "6/8")
@@ -68,9 +71,16 @@ def migrate(sheet: dict) -> dict:
 # --------------------------------------------------------------------------- #
 
 
+def instrument_id(sheet: dict) -> str:
+    inst = sheet.get("instrument")
+    return inst if inst in INSTRUMENTS else DEFAULT_INSTRUMENT
+
+
 def shape_shift(sheet: dict) -> int:
-    """Semitones from sounding pitch to the chord shapes shown."""
-    return int(sheet.get("transpose", 0)) - int(sheet.get("capo", 0))
+    """Semitones from sounding pitch to the chord shapes shown: the transpose, less
+    the capo, less how far the instrument is tuned above its shapes' names."""
+    tuning = INSTRUMENTS[instrument_id(sheet)]["tuning"]
+    return int(sheet.get("transpose", 0)) - int(sheet.get("capo", 0)) - tuning
 
 
 def chord_key(chord: dict, sheet: dict) -> str | None:
@@ -134,7 +144,8 @@ def beats_per_bar_for(ts: str, sheet: dict) -> int:
 
 def apply_settings(sheet: dict, transpose=None, capo=None, time_signature=None,
                    downbeat=None, shift_downbeat=None, reset_meter=False,
-                   harmonica_octave=None) -> dict:
+                   harmonica_octave=None, harmonica_type=None, harmonica_key=None,
+                   instrument=None) -> dict:
     """Validate and apply display settings in place. Raises ValueError."""
     meter = sheet["meter"]
     if reset_meter and meter.get("detected"):
@@ -143,6 +154,7 @@ def apply_settings(sheet: dict, transpose=None, capo=None, time_signature=None,
             "time_signature", TIME_SIGNATURES.get(detected["beats_per_bar"], "4/4"))
         meter["beats_per_bar"] = detected["beats_per_bar"]
         meter["downbeat"] = detected["downbeat"]
+        meter["sections"] = list(detected.get("sections") or [])
     if transpose is not None:
         if not -11 <= int(transpose) <= 11:
             raise ValueError("transpose must be between -11 and 11")
@@ -151,17 +163,27 @@ def apply_settings(sheet: dict, transpose=None, capo=None, time_signature=None,
         if not 0 <= int(capo) <= 11:
             raise ValueError("capo must be between 0 and 11")
         sheet["capo"] = int(capo)
+    if instrument is not None:
+        if instrument not in INSTRUMENTS:
+            raise ValueError(f"instrument must be one of {', '.join(INSTRUMENTS)}")
+        sheet["instrument"] = instrument
     if time_signature is not None:
         if time_signature not in TS_CHOICES:
             raise ValueError(f"time_signature must be one of {', '.join(TS_CHOICES)}")
+        meter["sections"] = []              # a hand-picked meter replaces the detected changes
         meter["time_signature"] = time_signature
         meter["beats_per_bar"] = beats_per_bar_for(time_signature, sheet)
         # keep bar lines anchored where the detector put the first downbeat
         anchor = (meter.get("detected") or {}).get("downbeat", meter["downbeat"])
         meter["downbeat"] = anchor % meter["beats_per_bar"]
     if downbeat is not None:
+        meter["sections"] = []
         meter["downbeat"] = int(downbeat) % meter["beats_per_bar"]
     if shift_downbeat is not None:
+        if meter.get("sections"):
+            # slide every section's downbeat together, keeping the meter changes
+            for sec in meter["sections"]:
+                sec["beat"] += int(shift_downbeat)
         meter["downbeat"] = (meter["downbeat"] + int(shift_downbeat)) % meter["beats_per_bar"]
     if harmonica_octave is not None:
         if not sheet.get("melody"):
@@ -169,7 +191,28 @@ def apply_settings(sheet: dict, transpose=None, capo=None, time_signature=None,
         if not -MAX_OCTAVE <= int(harmonica_octave) <= MAX_OCTAVE:
             raise ValueError(f"harmonica_octave must be between -{MAX_OCTAVE} and {MAX_OCTAVE}")
         sheet["melody"]["octave"] = int(harmonica_octave)
+    if harmonica_type is not None or harmonica_key is not None:
+        if not sheet.get("melody"):
+            raise ValueError("this song has no melody yet")
+        from .harmonica import get_instrument, instrument_of
+
+        current = instrument_of(sheet)
+        inst = get_instrument(harmonica_type or current.kind,
+                              harmonica_key if harmonica_key is not None else current.pc)
+        sheet["melody"]["instrument"] = inst.to_dict()
+        for note in sheet["melody"]["notes"]:
+            note["fingering"] = None        # a pinned fingering belongs to the old harp
     return sheet
+
+
+def meter_changes(sheet: dict) -> list[dict]:
+    """Meter changes after the first section: [{"bar" (1-based), "time_signature",
+    "time"}], empty for a song in one meter."""
+    grid = grid_for(sheet)
+    if grid is None:
+        return []
+    return [{"bar": c["bar"] + 1, "time_signature": TIME_SIGNATURES.get(c["beats_per_bar"], "4/4"),
+             "time": round(c["time"], 3)} for c in grid.section_changes()]
 
 
 def time_signature(sheet: dict) -> str:
@@ -182,9 +225,16 @@ def time_signature(sheet: dict) -> str:
 # --------------------------------------------------------------------------- #
 
 
+def syllabifier(sheet: dict):
+    """The sheet's word -> syllables function (language and, when stored, the
+    vocal loudness envelope that places the syllable boundaries)."""
+    return make_syllabifier((sheet.get("transcript") or {}).get("language"),
+                            sheet.get("vocal_env"))
+
+
 def _rows(sheet: dict) -> list[dict]:
     return build_rows(sheet["lines"], sheet["chords"], sheet.get("beat_period", 0.5),
-                      grid=grid_for(sheet))
+                      grid=grid_for(sheet), syllabify=syllabifier(sheet))
 
 
 def view(sheet: dict) -> dict:
@@ -213,10 +263,17 @@ def view(sheet: dict) -> dict:
         "key_label": key_label(sheet.get("key"), transpose),        # sounding, after transpose
         "shape_key_label": key_label(sheet.get("key"), shift),      # what you finger with capo
         "time_signature": time_signature(sheet),
-        "easy_shapes": easy_fraction(durations, transpose, int(sheet.get("capo", 0))),
-        "capo_suggestion": suggest_capo(durations, transpose, int(sheet.get("capo", 0))),
+        "meter_changes": meter_changes(sheet),
+        "instrument": instrument_id(sheet),
+        "instrument_label": INSTRUMENTS[instrument_id(sheet)]["label"],
+        "instruments": instrument_choices(),
+        "easy_shapes": easy_fraction(durations, transpose, int(sheet.get("capo", 0)),
+                                     instrument_id(sheet)),
+        "capo_suggestion": suggest_capo(durations, transpose, int(sheet.get("capo", 0)),
+                                        instrument=instrument_id(sheet)),
     }
     out.pop("melody", None)  # served as "harmonica" instead
+    out.pop("vocal_env", None)  # only used on the server, to place syllables
     out["harmonica"] = harmonica_view(sheet)
     return out
 
@@ -228,22 +285,37 @@ def view(sheet: dict) -> dict:
 
 def _header(sheet: dict) -> dict:
     transpose, capo = int(sheet.get("transpose", 0)), int(sheet.get("capo", 0))
+    shift = shape_shift(sheet)
+    inst = instrument_id(sheet)
     return {
         "key": key_short(sheet.get("key"), transpose),
         "capo": capo,
-        "shapes": key_short(sheet.get("key"), transpose - capo) if capo else None,
+        "shapes": key_short(sheet.get("key"), shift) if shift != transpose else None,
+        "instrument": INSTRUMENTS[inst]["label"] if inst != DEFAULT_INSTRUMENT else None,
         "time": time_signature(sheet) if sheet.get("beat_times") else None,
         "tempo": f"{sheet['tempo']:.0f}" if sheet.get("tempo") else None,
     }
 
 
-def _word_with_chords(word: dict, labels: list[tuple[str, float]]) -> list[tuple[int, str]]:
-    """Character offsets inside the word where each chord change falls,
-    proportional to the change time within the word's duration."""
+def _word_with_chords(word: dict, labels: list[tuple[str, float, str]]) -> list[tuple[int, str]]:
+    """Character offsets inside the word where each chord change falls.
+
+    A word split into syllables (`word["syl"]`, `word["at"]`) puts the chord at
+    the start of the syllable it sits over. A one-syllable word keeps its first
+    chord at the front, and a later change at the front or the end depending on
+    which half of the word it falls in; (a chord can't be "in" a single syllable)."""
     text, dur = word["text"], max(word["end"] - word["start"], 1e-6)
+    spans, at = word.get("syl"), word.get("at") or {}
     out = []
-    for k, (label, start) in enumerate(labels):
-        pos = 0 if k == 0 else round(len(text) * (start - word["start"]) / dur)
+    for k, (label, start, cid) in enumerate(labels):
+        if spans and cid in at:
+            pos = spans[at[cid]]["c"]
+        elif k == 0:
+            pos = 0
+        elif spans is None and len(text) > 0:
+            pos = 0 if (start - word["start"]) / dur < 0.5 else len(text)
+        else:
+            pos = round(len(text) * (start - word["start"]) / dur)
         out.append((min(max(pos, 0), len(text)), label))
     return out
 
@@ -272,6 +344,23 @@ def _row_key_change(row: dict, changes: dict[str, str]) -> str | None:
     return next((changes[c] for c in _row_chord_ids(row) if c in changes), None)
 
 
+def _row_time(row: dict, chords: dict) -> float | None:
+    """When a row begins: its first word, or the first chord of an instrumental row."""
+    if row["type"] == "lyric":
+        return row["words"][0]["start"] if row["words"] else None
+    ids = _row_chord_ids(row)
+    return chords[ids[0]]["start"] if ids else None
+
+
+def _due_meter_changes(pending: list[dict], row: dict, chords: dict) -> list[dict]:
+    """Pop the meter changes that happen at or before this row starts."""
+    t = _row_time(row, chords)
+    due = []
+    while t is not None and pending and pending[0]["time"] <= t + 0.3:
+        due.append(pending.pop(0))
+    return due
+
+
 def to_text(sheet: dict) -> str:
     """Monospace chords-over-lyrics sheet."""
     sheet = migrate(sheet)
@@ -282,8 +371,12 @@ def to_text(sheet: dict) -> str:
     meta = []
     if h["key"]:
         meta.append(f"Key: {h['key']}")
+    if h["instrument"]:
+        meta.append(f"Instrument: {h['instrument']}")
     if h["capo"]:
         meta.append(f"Capo {h['capo']} (play {h['shapes']} shapes)")
+    elif h["shapes"]:
+        meta.append(f"Play {h['shapes']} shapes")
     if h["time"]:
         meta.append(f"Time: {h['time']}")
     if h["tempo"]:
@@ -293,10 +386,13 @@ def to_text(sheet: dict) -> str:
     out.append("")
 
     changes = key_changes(sheet)
+    pending_meter = meter_changes(sheet)
     for row in _rows(sheet):
         change = _row_key_change(row, changes)
         if change:
             out.append(f"[Key change: {change}]")
+        for mc in _due_meter_changes(pending_meter, row, chords):
+            out.append(f"[Time: {mc['time_signature']}]")
         if row["type"] == "instrumental":
             out.append(_bar_text(row, label))
             continue
@@ -307,7 +403,7 @@ def to_text(sheet: dict) -> str:
             if lyric:
                 lyric += " "
             base = len(lyric)
-            labels = [(label(c), chords[c]["start"]) for c in w["chords"]]
+            labels = [(label(c), chords[c]["start"], c) for c in w["chords"]]
             for pos, lab in _word_with_chords(w, labels):
                 col = base + pos
                 if chord_line:
@@ -329,6 +425,8 @@ def to_chordpro(sheet: dict) -> str:
     out = [f"{{title: {sheet.get('title', 'Untitled')}}}"]
     if h["key"]:
         out.append(f"{{key: {h['key']}}}")
+    if h["instrument"]:
+        out.append(f"{{comment: Instrument: {h['instrument']}}}")
     if h["capo"]:
         out.append(f"{{capo: {h['capo']}}}")
     if h["time"]:
@@ -340,10 +438,13 @@ def to_chordpro(sheet: dict) -> str:
     bracket = lambda cid: f"[{label(cid)}]"  # noqa: E731
     changes = key_changes(sheet)
     transpose = int(sheet.get("transpose", 0))
+    pending_meter = meter_changes(sheet)
     for row in _rows(sheet):
         change_id = next((c for c in _row_chord_ids(row) if c in changes), None)
         if change_id:
             out.append(f"{{key: {key_short(chord_key(chords[change_id], sheet), transpose)}}}")
+        for mc in _due_meter_changes(pending_meter, row, chords):
+            out.append(f"{{time: {mc['time_signature']}}}")
         if row["type"] == "instrumental":
             out.append("{comment: Instrumental}")
             out.append(_bar_text(row, bracket) if "bars" in row
@@ -353,7 +454,7 @@ def to_chordpro(sheet: dict) -> str:
             out.append("")
         parts = []
         for w in row["words"]:
-            labels = [(label(c), chords[c]["start"]) for c in w["chords"]]
+            labels = [(label(c), chords[c]["start"], c) for c in w["chords"]]
             text, built, last = w["text"], "", 0
             for pos, lab in _word_with_chords(w, labels):
                 built += text[last:pos] + f"[{lab}]"
