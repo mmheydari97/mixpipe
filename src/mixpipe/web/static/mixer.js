@@ -169,6 +169,7 @@ function renderSession(st, { fresh = false } = {}) {
   if (fresh) {
     $("#chat-log").replaceChildren(...(st.turns || st.versions).flatMap(chatEntry).filter(Boolean));
     scrollChat();
+    checkAiStatus();
   }
   renderModelControl(st);
   renderVersions(st);
@@ -188,7 +189,8 @@ function chatEntry(v) {
   const chips = (v.changes || []).map((c) => el("span", { class: "chip" }, c.text));
   const src = v.source || "";
   const byModel = src.startsWith("chat:llm") || src.startsWith("llm");
-  const via = src === "manual" ? "fader" : byModel ? (v.model ? shortModel(v.model) : "model")
+  const via = src === "manual" ? "fader" : src.startsWith("ai:") ? `ACE-Step${v.model ? ` (${v.model})` : ""}`
+    : byModel ? (v.model ? shortModel(v.model) : "model")
     : src.startsWith("chat:rules") ? "keyword rules" : src.startsWith("rules") ? "rule-based advisor" : src;
   const notes = [];
   if (v.llm_error) notes.push(el("small", { class: "warn" }, `Model unavailable (${v.llm_error}); used the keyword rules.`));
@@ -200,7 +202,7 @@ function chatEntry(v) {
     el("div", { class: "meta" },
       v.n ? el("button", { class: "link", onclick: () => gotoVersion(v.n) }, `v${v.n}`) : el("span", {}, "no change"),
       via ? el("span", { title: byModel && v.model ? v.model : null }, ` · ${via}`) : "",
-      v.render_s ? ` · rendered in ${v.render_s.toFixed(1)} s` : ""))];
+      v.render_s ? ` · ${v.kind === "ai" ? "made" : "rendered"} in ${v.render_s.toFixed(1)} s` : ""))];
 }
 function scrollChat() { const log = $("#chat-log"); log.scrollTop = log.scrollHeight; }
 
@@ -285,7 +287,7 @@ async function switchModel(id) {
 }
 
 function setBusy(b) {
-  for (const id of ["#chat-send", "#undo-btn", "#redo-btn", "#export-btn", "#model-rules"]) $(id).disabled = b;
+  for (const id of ["#chat-send", "#undo-btn", "#redo-btn", "#export-btn", "#model-rules", "#ai-send"]) $(id).disabled = b;
   $("#chat-input").disabled = b;
   document.querySelectorAll(".channels input").forEach((i) => { i.disabled = b; });
 }
@@ -296,6 +298,7 @@ function renderVersions(st) {
   const ol = $("#version-list");
   ol.replaceChildren(...[...st.versions].reverse().map((v) => el("li", { class: v.n === st.current ? "on" : "" },
     el("button", { class: "link", onclick: () => gotoVersion(v.n) }, `v${v.n}`),
+    v.kind === "ai" ? el("span", { class: "badge ai", title: `AI edit of v${v.parent}; its plan is v${v.base}'s` }, "AI") : "",
     el("span", { class: "vmsg" }, v.source === "manual" ? (v.changes || []).map((c) => c.text).join("; ") : v.message),
     el("span", { class: "muted small" }, v.output?.lufs != null ? `${v.output.lufs.toFixed(1)} LUFS` : ""))));
   const sel = $("#ab-b-select");
@@ -328,7 +331,8 @@ function alertLine(text, kind = "error") {
 $("#export-btn").addEventListener("click", async () => {
   const depth = Number($("#export-depth").value);
   const msg = $("#export-msg");
-  msg.textContent = current.preview ? "Rendering the whole song…" : "Rendering…";
+  const ai = cur()?.kind === "ai";
+  msg.textContent = ai ? "Writing the AI edit…" : current.preview ? "Rendering the whole song…" : "Rendering…";
   setBusy(true);
   try {
     const res = await fetch(`/api/sessions/${sessionId}/export`, jsonBody("POST", { bit_depth: depth, full: true }));
@@ -337,7 +341,8 @@ $("#export-btn").addEventListener("click", async () => {
     const name = (res.headers.get("content-disposition") || "").match(/filename="?([^"]+)"?/)?.[1] || "mix.wav";
     const a = el("a", { href: URL.createObjectURL(blob), download: name });
     document.body.append(a); a.click(); a.remove();
-    msg.textContent = `Saved ${name}.`;
+    msg.textContent = ai && current.preview
+      ? `Saved ${name}. An AI edit is the length of the preview it was made from.` : `Saved ${name}.`;
   } catch (e) { msg.textContent = e.message; } finally { setBusy(false); }
 });
 
@@ -346,6 +351,9 @@ $("#export-btn").addEventListener("click", async () => {
 function renderChannels(st) {
   const v = cur();
   if (!v) return;
+  $("#channels-note").textContent = v.kind === "ai"
+    ? `v${v.n} is an AI edit: these are v${v.base}'s settings, and a change here is made from v${v.base}.`
+    : "Faders and chat make the same kind of change, and either can be undone.";
   $("#channel-rows").replaceChildren(...Object.entries(v.stems).map(([name, s]) => {
     const level = v.levels?.[name];
     const fader = el("input", { type: "range", min: "-24", max: "12", step: "0.5", value: s.fader_db ?? 0,
@@ -358,7 +366,7 @@ function renderChannels(st) {
     return el("tr", { class: s.mute ? "muted-row" : "" },
       el("td", {}, el("span", { class: "stem-name" }, name), el("small", { class: "muted" }, s.role)),
       el("td", { class: "num", title: level == null && !s.mute ? "No audible signal in this stretch" : null },
-        s.mute ? "–" : level != null ? `${fmtDb(level)} dB` : el("span", { class: "muted" }, "silent")),
+        s.mute || !v.levels ? "–" : level != null ? `${fmtDb(level)} dB` : el("span", { class: "muted" }, "silent")),
       el("td", { class: "fader" }, fader, val),
       el("td", {}, mute));
   }));
@@ -385,6 +393,76 @@ function renderStats() {
     item("Crest", o.crest_db != null ? `${o.crest_db.toFixed(1)} dB` : "–", "Peak to RMS: lower is more squashed"),
     item("Stereo", o.lr_correlation != null ? o.lr_correlation.toFixed(2) : "–", "L/R correlation: 1 is mono, below 0 has phase problems"));
 }
+
+// ------------------------------------------------------------------ AI edit
+
+let aiMode = "repaint";
+function setAiMode(mode) {
+  aiMode = mode;
+  $("#ai-tab-repaint").setAttribute("aria-selected", String(mode === "repaint"));
+  $("#ai-tab-cover").setAttribute("aria-selected", String(mode === "cover"));
+  $("#ai-range").hidden = mode !== "repaint";
+  $("#ai-strength-row").hidden = mode !== "cover";
+}
+$("#ai-tab-repaint").addEventListener("click", () => setAiMode("repaint"));
+$("#ai-tab-cover").addEventListener("click", () => setAiMode("cover"));
+$("#ai-strength").addEventListener("input", () => { $("#ai-strength-val").textContent = $("#ai-strength").value; });
+$("#ai-start-here").addEventListener("click", () => { $("#ai-start").value = fmtClock(A.currentTime); });
+$("#ai-end-here").addEventListener("click", () => { $("#ai-end").value = fmtClock(A.currentTime); });
+
+const fmtClock = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
+function parseClock(text) {
+  // "1:05.5", "65.5" -> seconds; "" -> null
+  const t = text.trim();
+  if (!t) return null;
+  const m = t.match(/^(?:(\d+):)?(\d+(?:\.\d+)?)$/);
+  if (!m) throw new Error(`not a time: ${t} (use 0:20 or 20)`);
+  return (m[1] ? Number(m[1]) * 60 : 0) + Number(m[2]);
+}
+
+async function checkAiStatus() {
+  const badge = $("#ai-status");
+  try {
+    const st = await api("/api/ai-edit/status");
+    badge.textContent = st.ok ? `ACE-Step: ${st.model || "ready"}` : "ACE-Step not running";
+    badge.className = `badge ${st.ok ? "ok" : "err"}`;
+    badge.title = st.ok ? st.url : `Start it with \`make acestep\` (${st.url})`;
+  } catch { badge.textContent = ""; }
+}
+
+$("#ai-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const prompt = $("#ai-prompt").value.trim();
+  if (!prompt || !sessionId) return;
+  const body = { prompt, mode: aiMode };
+  try {
+    if (aiMode === "repaint") { body.start = parseClock($("#ai-start").value) ?? 0; body.end = parseClock($("#ai-end").value); }
+    else body.strength = Number($("#ai-strength").value);
+  } catch (err) { alertLine(err.message); return; }
+  const from = versionA ?? current.current;
+  if (from !== current.current) {
+    // the edit is made from the version being listened to
+    try { renderSession(await api(`/api/sessions/${sessionId}/goto/${from}`, { method: "POST" })); }
+    catch (err) { alertLine(err.message); return; }
+  }
+  const what = aiMode === "repaint"
+    ? `Repaint ${fmtClock(body.start)}–${body.end != null ? fmtClock(body.end) : "end"} of v${from}: ${prompt}`
+    : `Re-style v${from} (strength ${body.strength}): ${prompt}`;
+  const log = $("#chat-log");
+  log.append(el("li", { class: "msg-user" }, what));
+  const thinking = el("li", { class: "msg-bot thinking" }, "ACE-Step is making it (half a minute or so; the first edit also loads the model)…");
+  log.append(thinking); scrollChat();
+  setBusy(true);
+  try {
+    const res = await api(`/api/sessions/${sessionId}/ai-edit`, jsonBody("POST", body));
+    thinking.replaceWith(chatEntry(res.turn)[1]);
+    renderSession(res);
+    selectVersionA(res.turn.n);
+  } catch (err) {
+    thinking.replaceWith(el("li", { class: "msg-bot error" }, err.message));
+    checkAiStatus();
+  } finally { setBusy(false); scrollChat(); }
+});
 
 // ------------------------------------------------------------------ A/B player
 

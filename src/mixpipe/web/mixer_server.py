@@ -9,6 +9,8 @@ separated; the first mix is made in the background, then every chat message
 A turn renders a preview slice for long songs; Export renders the whole song.
 Which OpenRouter model answers can be picked when starting a mix and changed
 between turns (the picker in static/common.js reads /api/openrouter/models).
+AI edits go to a local ACE-Step server (`acestep.py`); /api/ai-edit/status says
+whether it is running.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from .. import openrouter, songstore
+from .. import acestep, openrouter, songstore
 from ..config import load_config
 from ..io_utils import AUDIO_EXTS, UPLOAD_EXTS
 from ..session import MixSession, llm_choice
@@ -47,6 +49,15 @@ class ExportIn(BaseModel):
     full: bool = True
 
 
+class AiEditIn(BaseModel):
+    prompt: str
+    mode: str = "repaint"
+    start: float = 0.0
+    end: float | None = None        # None: to the end of the clip
+    strength: float | None = None   # cover only
+    seed: int | None = None
+
+
 class ModelIn(BaseModel):
     model: str | None = None        # an OpenRouter model id; None or "" for the keyword rules
 
@@ -58,10 +69,11 @@ def create_app(
     use_llm: bool | None = None,
     run_inline: bool = False,
     session_options: dict | None = None,
+    editor=None,
 ) -> FastAPI:
     """Build the app. `llm(system, payload) -> text` replaces the real model (tests);
     `use_llm=False` forces the keyword rules; `run_inline` makes the first mix
-    synchronously instead of on the worker."""
+    synchronously instead of on the worker; `editor` replaces ACE-Step (tests)."""
     app = FastAPI(title="mixpipe mixer")
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -94,6 +106,7 @@ def create_app(
                 if use_llm is False:          # the server was started without the model: that wins
                     kwargs["use_llm"] = False
                 s = MixSession(str(stems_dir), out_dir=str(root / sid / "versions"), llm=llm, **kwargs)
+                s.editor = editor
                 s.first_mix(notes)
                 entry["session"] = s
                 entry["state"] = "ready"
@@ -255,6 +268,27 @@ def create_app(
         s = ready(sid)
         v = s.set_params(body.adjustments, body.label)
         return {"turn": s.summary(v) if v else None, **state(sid)}
+
+    @app.get("/api/ai-edit/status")
+    def ai_edit_status():
+        if editor is not None:
+            return {"url": "injected", "ok": True, "model": "test", "error": None}
+        return acestep.status()
+
+    @app.post("/api/sessions/{sid}/ai-edit")
+    def ai_edit(sid: str, body: AiEditIn):
+        s = ready(sid)
+        if editor is None and not acestep.status()["ok"]:
+            raise HTTPException(503, f"ACE-Step isn't running at {acestep.base_url()} "
+                                     "(start it with `make acestep`, see README)")
+        try:
+            v = s.ai_edit(body.prompt, mode=body.mode, start_s=body.start, end_s=body.end,
+                          strength=body.strength, seed=body.seed)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 - the model's failure, shown on the page
+            raise HTTPException(502, f"ACE-Step: {exc}") from exc
+        return {"turn": s.summary(v), **state(sid)}
 
     @app.post("/api/sessions/{sid}/model")
     def set_model(sid: str, body: ModelIn):

@@ -179,6 +179,9 @@ function createModelPicker(container, kind, {
       else if (m.word_timing === "approx") badges.push(el("span", { class: "badge" }, "word timing ~"));
     } else {
       if ((m.input_modalities || []).includes("audio")) badges.push(el("span", { class: "badge" }, "audio in"));
+      for (const out of m.output_modalities || []) {
+        if (out !== "text") badges.push(el("span", { class: "badge" }, `+${out} out`));
+      }
       if (m.context_length) badges.push(el("span", { class: "badge" }, `${Math.round(m.context_length / 1000)}k ctx`));
     }
     return badges;

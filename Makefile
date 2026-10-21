@@ -1,4 +1,4 @@
-.PHONY: install install-chords stems demo-session verify-mix analyze mix mix-llm chat mix-ui chords chords-ui split split-ui test clean
+.PHONY: install install-chords stems demo-session verify-mix analyze mix mix-llm chat mix-ui mix-studio install-acestep acestep chords chords-ui split split-ui test clean
 
 # Use the project venv when there is one, so targets work without activating it.
 PY := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
@@ -11,13 +11,27 @@ ARGS ?=
 install:
 	$(PIP) -r requirements.txt
 
-install-chat:
+chat:
 	$(RUN) -m mixpipe.cli chat --stems $(or $(STEMS),stems/) $(ARGS)
 
 mix-ui:
 	$(RUN) -m mixpipe.cli mix-ui $(ARGS)
 
-chords:
+# AI edits: a local ACE-Step 1.5 server, in its own checkout and venv (about 11 GB with the model)
+ACESTEP_DIR ?= ../ACE-Step-1.5
+install-acestep:
+	test -d $(ACESTEP_DIR) || git clone --depth 1 https://github.com/ace-step/ACE-Step-1.5.git $(ACESTEP_DIR)
+	cd $(ACESTEP_DIR) && uv sync
+
+# the mixer page and the ACE-Step server together; Ctrl+C stops both
+mix-studio:
+	ACESTEP_DIR=$(ACESTEP_DIR) scripts/mix_studio.sh $(ARGS)
+
+acestep:
+	cd $(ACESTEP_DIR) && ACESTEP_LM_BACKEND=mlx ACESTEP_INIT_LLM=false TOKENIZERS_PARALLELISM=false \
+		uv run acestep-api --host 127.0.0.1 --port 8001
+
+install-chords:
 	$(PIP) -r requirements.txt -r requirements-chords.txt
 
 stems:

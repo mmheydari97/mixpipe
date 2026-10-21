@@ -108,6 +108,39 @@
               <button class="primary" id="chat-send">Send</button>
             </form>
           </div>
+
+          <div class="card ai-edit">
+            <div class="card-head">
+              <h2>AI edit</h2>
+              <span id="ai-status" class="badge"></span>
+            </div>
+            <p class="muted small">ACE-Step, running on this machine, rewrites the music of the version in A.
+              The result is a new version; mix changes made from it start again from its plan.</p>
+            <form id="ai-form">
+              <div class="tabs" role="tablist">
+                <button type="button" role="tab" id="ai-tab-repaint" aria-selected="true">Repaint a range</button>
+                <button type="button" role="tab" id="ai-tab-cover" aria-selected="false">Re-style all of it</button>
+              </div>
+              <div id="ai-range" class="ai-row">
+                <label class="field"><span>From</span><input id="ai-start" value="0:00" inputmode="decimal" aria-label="Start"></label>
+                <button type="button" id="ai-start-here" class="link">← playhead</button>
+                <label class="field"><span>To</span><input id="ai-end" placeholder="end" inputmode="decimal" aria-label="End"></label>
+                <button type="button" id="ai-end-here" class="link">← playhead</button>
+              </div>
+              <div id="ai-strength-row" class="ai-row" hidden>
+                <label class="field"><span>Strength <output id="ai-strength-val">0.7</output></span>
+                  <input type="range" id="ai-strength" min="0" max="1" step="0.05" value="0.7"></label>
+                <small class="muted">Higher stays closer to the original; lower reinterprets it more freely.</small>
+              </div>
+              <label class="field">
+                <span>Describe the music you want there</span>
+                <textarea id="ai-prompt" rows="2" placeholder="e.g. indie folk, a driving rock drum beat with crash cymbals"></textarea>
+              </label>
+              <div class="actions">
+                <button class="primary" id="ai-send">Edit with AI</button>
+              </div>
+            </form>
+          </div>
         </div>
 
         <div class="col-side">
@@ -136,7 +169,7 @@
               <thead><tr><th>Stem</th><th title="Level in the mix, relative to the whole">In mix</th><th>Fader</th><th>Mute</th></tr></thead>
               <tbody id="channel-rows"></tbody>
             </table>
-            <p class="muted small">Faders and chat make the same kind of change, and either can be undone.</p>
+            <p id="channels-note" class="muted small">Faders and chat make the same kind of change, and either can be undone.</p>
           </div>
         </div>
       </div>

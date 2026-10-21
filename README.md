@@ -110,6 +110,7 @@ After the first mix, say what you hear and the mix changes:
 
 ```bash
 make mix-ui                                   # web page on http://127.0.0.1:8767
+make mix-studio                               # the same, with the ACE-Step server for AI edits
 make chat STEMS=stems/                        # the same in the terminal
 make chat STEMS=out/splitter/<song id>/stems
 ```
@@ -146,8 +147,11 @@ How a turn works (`session.MixSession`, `advisor.revise_plan`):
   model off, and `/models <words>` searches the catalogue. Each version records the
   model that made it. With nothing picked, the default is `advisor.openrouter_model`
   (`anthropic/claude-haiku-5.5`) when only `OPENROUTER_API_KEY` is set, otherwise the
-  configured provider. Models that only work through OpenRouter's batch API
-  (`:batch`) are left out of the picker. A turn takes the model's answer time plus
+  configured provider. The picker lists every model that can answer in text;
+  ones that also return audio or images (`gpt-audio`, `gpt-5-image`, Lyria) carry
+  a `+audio out` / `+image out` badge, and only their text is used. The catalogue
+  is fetched again after an hour. Models that only work through OpenRouter's batch
+  API (`:batch`) are left out of the picker. A turn takes the model's answer time plus
   2-4 s of rendering; a small free model may answer in a form the mixer can't use,
   and that message then goes to the keyword rules.
 - Each turn is a new version; nothing is thrown away. Undo goes back to the version
@@ -160,6 +164,50 @@ How a turn works (`session.MixSession`, `advisor.revise_plan`):
   Songs longer than 75 s are worked on as their loudest 45 s; Export renders the
   whole song with the current plan (measured on a 3:18 song with 6 stems: 39 s the
   first time, 18 s after that, since the full-length stems are then cleaned).
+
+### AI edits (ACE-Step)
+
+Chat changes the mix; an **AI edit** changes the music. A local
+[ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) server rewrites part of
+the version you are listening to from a prompt, and the result is the next version:
+
+```bash
+make install-acestep        # once: clones ../ACE-Step-1.5 and installs it (its own venv, ~11 GB)
+make mix-studio             # ACE-Step + the mixer page; Ctrl+C stops both
+make acestep                # or just the server, on http://127.0.0.1:8001
+```
+
+`make mix-studio` (`scripts/mix_studio.sh`) starts ACE-Step, waits until it
+answers, then starts the mixer page. An ACE-Step that's already running is used
+and left running. If ACE-Step isn't installed or fails to start, the mixer still
+starts without AI edits, and the script says why (log: `out/logs/acestep.log`).
+`ACESTEP_DIR` and `ACESTEP_PORT` override where it lives and listens.
+
+```
+mix> /ai 0:20-0:32 a driving rock drum beat with crash cymbals
+  ACE-Step repainted 0:20-0:32 of v1 (acestep-v15-turbo, 37 s). ...
+mix> /cover 0.7 lo-fi, tape saturation, dusty drums
+```
+
+- **Repaint** rewrites a time range and keeps everything else. The model returns
+  the whole clip, but outside the range MixPipe keeps the original samples
+  (`acestep.splice`, with 50 ms crossfades), so only the range changes.
+  **Cover** re-styles the whole clip; a higher strength stays closer to it,
+  a lower one reinterprets it more freely. What the model adds goes through the
+  master's limiter at the plan's ceiling, since it skipped the master chain.
+- The prompt describes the music you want in that stretch (style, instruments,
+  mood), not an instruction like "make the drums punchier". ACE-Step generates
+  new audio there, so voices and tones can drift from the original.
+- An AI edit is audio, not a plan, so it is a branch of the history. A chat turn
+  or a fader move while you listen to it is made from the plan it came from
+  (shown as "Mixed from vN"), and doesn't include the edit. Export writes the
+  edited audio as it is. In a preview session that's the 45 s preview; start the
+  session over the whole song to edit and export all of it.
+- The audio goes to the ACE-Step server on this machine (`ACESTEP_URL`), nowhere
+  else. On an M4 Pro (24 GB) with the turbo model, repainting part of a 47 s clip
+  took 21-37 s, plus about 2 minutes to load the model on the first edit.
+- In the web page it's the **AI edit** card. In the terminal it's `/ai [start-end] <prompt>`
+  and `/cover [strength] <prompt>`.
 
 ## Checking a mix
 

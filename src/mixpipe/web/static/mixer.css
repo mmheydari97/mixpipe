@@ -100,3 +100,11 @@ input[type=range] { accent-color: var(--accent); }
 .channels .fader input { width: 100%; min-width: 70px; }
 .channels output { font-family: var(--mono); font-size: .8em; min-width: 4ch; text-align: right; color: var(--muted); }
 .channels tr.muted-row .stem-name { opacity: .45; text-decoration: line-through; }
+
+/* ---------- AI edit ---------- */
+.ai-edit > p { margin: 0 0 10px; }
+.ai-row { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.ai-row .field { margin-top: 0; }
+.ai-row input:not([type=range]) { width: 7em; font-family: var(--mono); }
+.ai-row .link { padding-bottom: 8px; }
+.badge.ai { background: var(--accent-soft); color: var(--text); }

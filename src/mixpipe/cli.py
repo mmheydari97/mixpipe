@@ -235,6 +235,31 @@ def cmd_split_ui(args) -> int:
                   args.no_browser)
 
 
+_CLOCK = r"\d+(?::\d+)?(?:\.\d+)?"                  # 65, 65.5, 1:05, 1:05.5
+_RANGE = re.compile(rf"^({_CLOCK})-({_CLOCK})?$")      # 0:20-0:32, or 0:20- to the end
+
+
+def _seconds(clock: str) -> float:
+    """"1:05.5" or "65.5" -> 65.5"""
+    m, _, sec = clock.rpartition(":")
+    return (int(m) * 60 if m else 0) + float(sec)
+
+
+def parse_ai_edit(cmd: str, rest: str) -> dict:
+    """The options of `/ai [start-end] <prompt>` or `/cover [strength] <prompt>`."""
+    first, _, tail = rest.strip().partition(" ")
+    if cmd == "/ai":
+        m = _RANGE.match(first)
+        if m:
+            return {"mode": "repaint", "start_s": _seconds(m.group(1)),
+                    "end_s": _seconds(m.group(2)) if m.group(2) else None, "prompt": tail.strip()}
+        return {"mode": "repaint", "start_s": 0.0, "end_s": None, "prompt": rest.strip()}
+    try:
+        return {"mode": "cover", "strength": float(first), "prompt": tail.strip()}
+    except ValueError:
+        return {"mode": "cover", "strength": None, "prompt": rest.strip()}
+
+
 def cmd_chat(args) -> int:
     """Mix by talking: type what's wrong, hear the new version, /undo if worse."""
     from .session import MixSession
@@ -296,8 +321,29 @@ def cmd_chat(args) -> int:
         elif len(found) > 15:
             print(f"  ... {len(found) - 15} more; add words to narrow it down ('free' puts free ones first)")
 
+    def ai_command(cmd: str, rest: str) -> None:
+        from . import acestep
+
+        opts = parse_ai_edit(cmd, rest)
+        if not opts["prompt"]:
+            print("  usage: /ai [start-end] <prompt>   e.g. /ai 0:20-0:32 a driving rock drum beat\n"
+                  "         /cover [strength 0-1] <prompt>")
+            return
+        st = acestep.status()
+        if not st["ok"]:
+            print(f"  ACE-Step isn't running at {st['url']} (make acestep in another terminal)")
+            return
+        print(f"  asking ACE-Step ({st['model']}) ...")
+        try:
+            show(s.ai_edit(opts.pop("prompt"), **opts))
+        except ValueError as exc:
+            print(f"  {exc}")
+        except Exception as exc:  # noqa: BLE001 - keep the session
+            print(f"  ACE-Step failed: {exc}")
+
     show(s.first_mix(args.notes))
-    help_line = "/undo /redo /goto N /plan /levels /model [id] /models [words] /export [path] /quit"
+    help_line = ("/undo /redo /goto N /plan /levels /model [id] /models [words] "
+                 "/ai [start-end] <prompt> /cover [strength] <prompt> /export [path] /quit")
     print(f"type what to change, or {help_line}")
     while True:
         try:
@@ -321,6 +367,8 @@ def cmd_chat(args) -> int:
                 print("  no such version")
         elif cmd == "/plan":
             print(describe_plan(s.current["plan"]))
+        elif cmd == "/levels" and s.current.get("levels") is None:
+            print(f"  v{s.current['n']} is an AI edit: no per-stem levels")
         elif cmd == "/levels":
             for name, lv in s.current["levels"].items():
                 st = s.current["plan"]["stems"][name]
@@ -329,6 +377,8 @@ def cmd_chat(args) -> int:
             model_command(rest)
         elif cmd == "/models":
             models_command(rest)
+        elif cmd in ("/ai", "/cover"):
+            ai_command(cmd, rest)
         elif cmd == "/export":
             path = rest.strip() or str(out / f"mix_v{s.current['n']}_full.wav")
             print(f"  wrote {s.export(path, bit_depth=args.bit_depth)}")

@@ -104,6 +104,7 @@ def normalize_model(model: dict, kind: str) -> dict:
         "sort_price": sort_price if sort_price != float("inf") else 1e12,
         "context_length": model.get("context_length"),
         "input_modalities": arch.get("input_modalities") or [],
+        "output_modalities": arch.get("output_modalities") or ["text"],
     }
 
 
@@ -156,10 +157,11 @@ def list_models(kind: str = "chat", refresh: bool = False) -> list[dict]:
     # ":batch" variants only work through the batch API; chat/completions answers 404
     raw = [m for m in raw if not str(m.get("id", "")).endswith(":batch")]
     if kind == "chat":
-        # text-in/text-out only: drops music, image and speech generators
+        # anything that can answer in text; models that also return audio or images
+        # (gpt-audio, gpt-5-image, Lyria) stay, and the picker tags them
         raw = [
             m for m in raw
-            if ((m.get("architecture") or {}).get("output_modalities") or ["text"]) == ["text"]
+            if "text" in ((m.get("architecture") or {}).get("output_modalities") or ["text"])
         ]
     models = [normalize_model(m, kind) for m in raw]
     _model_cache[kind] = (now, models)

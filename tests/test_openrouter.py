@@ -43,6 +43,13 @@ def test_batch_variants_are_not_offered(catalogue):
     assert "google/gemini-2.5-flash" in ids and not any(i.endswith(":batch") for i in ids)
 
 
+def test_models_that_also_return_audio_or_images_are_offered(catalogue):
+    by_id = {m["id"]: m for m in openrouter.list_models("chat")}
+    assert by_id["openai/gpt-audio-mini"]["output_modalities"] == ["text", "audio"]
+    assert by_id["openrouter/auto"]["output_modalities"] == ["text", "image"]
+    assert by_id["google/gemini-2.5-flash"]["output_modalities"] == ["text"]
+
+
 def test_search_ranks_like_the_web_picker(catalogue):
     models = openrouter.list_models("chat")
     assert openrouter.search_models(models, "gemini")[0]["id"] == "google/gemini-2.5-flash"
