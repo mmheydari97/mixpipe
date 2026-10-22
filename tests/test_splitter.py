@@ -167,6 +167,70 @@ def test_render_speed_and_mp3(client, wav_bytes):
     assert r.content[:3] == b"ID3" or r.content[0] == 0xFF
 
 
+def test_stem_download_is_that_stem_at_full_level(client, wav_bytes):
+    sid = upload(client, wav_bytes)
+    r = client.post(f"/api/songs/{sid}/stems/guitar/render", json={})
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == "audio/flac"
+    assert f'filename="{sid}-guitar.flac"' in r.headers["content-disposition"]
+    stem, sr = sf.read(io.BytesIO(r.content), always_2d=True)
+    assert sr == SR and stem.shape == (int(SR * SECONDS), 2)
+    assert tone_energy(stem, FREQS["guitar"]) == pytest.approx(0.05, rel=0.05)   # 0.1 sine, unity
+    assert tone_energy(stem, FREQS["drums"]) < 0.01 * tone_energy(stem, FREQS["guitar"])
+
+    wav = client.post(f"/api/songs/{sid}/stems/vocals/render", json={"fmt": "wav"})
+    assert wav.status_code == 200 and wav.headers["content-type"] == "audio/wav"
+    assert client.post(f"/api/songs/{sid}/stems/kazoo/render", json={}).status_code == 404
+    assert client.post(f"/api/songs/{sid}/stems/guitar/render", json={"fmt": "ogg"}).status_code == 400
+    assert client.post(f"/api/songs/{sid}/stems/guitar/render", json={"speed": 9}).status_code == 400
+
+
+def test_all_stems_as_a_zip(client, wav_bytes):
+    import zipfile
+
+    sid = upload(client, wav_bytes)
+    r = client.post(f"/api/songs/{sid}/stems.zip", json={"fmt": "wav"})
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == "application/zip"
+    assert f'filename="{sid}-stems.zip"' in r.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        names = zf.namelist()
+        assert names == [f"{sid}-{n}.wav" for n in STEM_NAMES]
+        for name in STEM_NAMES:
+            stem, _ = sf.read(io.BytesIO(zf.read(f"{sid}-{name}.wav")), always_2d=True)
+            others = [f for n, f in FREQS.items() if n != name]
+            assert tone_energy(stem, FREQS[name]) > 50 * max(tone_energy(stem, f) for f in others)
+
+
+def test_download_names_survive_any_script(client, wav_bytes):
+    from urllib.parse import quote
+
+    sid = client.post("/api/songs", files=[("files", ("آهنگ.wav", wav_bytes(song(), SR),
+                                                      "audio/wav"))]).json()["id"]
+    assert not sid.isascii()
+    for url in (f"/api/songs/{sid}/render", f"/api/songs/{sid}/stems/bass/render",
+                f"/api/songs/{sid}/stems.zip"):
+        r = client.post(url, json={})
+        assert r.status_code == 200, (url, r.text)
+        cd = r.headers["content-disposition"]
+        assert f"filename*=UTF-8''{quote(sid)}" in cd and 'filename="' in cd
+
+
+@needs_rubberband
+def test_stems_zip_follows_speed(client, wav_bytes):
+    import zipfile
+
+    sid = upload(client, wav_bytes)
+    r = client.post(f"/api/songs/{sid}/stems.zip", json={"speed": 0.5})
+    assert r.status_code == 200, r.text
+    assert "-50pct.zip" in r.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        assert len(zf.namelist()) == len(STEM_NAMES)
+        drums, _ = sf.read(io.BytesIO(zf.read(f"{sid}-drums-50pct.flac")), always_2d=True)
+    assert len(drums) / SR == pytest.approx(2 * SECONDS, rel=0.02)
+    assert tone_energy(drums, FREQS["drums"]) > 5 * tone_energy(drums, FREQS["drums"] / 2)
+
+
 def upload(client, wav_bytes) -> str:
     return client.post("/api/songs", files=[("files", ("s.wav", wav_bytes(song(), SR),
                                                        "audio/wav"))]).json()["id"]
@@ -222,7 +286,7 @@ def test_version_changes_speed_and_key(client, wav_bytes):
 
 @pytest.mark.skipif(shutil.which("rubberband") is None, reason="needs the rubberband tool")
 def test_stretch_reports_progress():
-    from mixpipe.splitter import stretch
+    from mixpipe import stretch
 
     seen = []
     stretch.stretch(song(), SR, 0.7, 2, "fast", progress=seen.append)
@@ -277,3 +341,145 @@ def test_page_assets_are_versioned_and_revalidated(client):
     assert r.headers["cache-control"] == "no-cache"
     assert '/static/splitter.js?v=' in r.text and '/static/common.js?v=' in r.text
     assert client.get("/static/splitter.js").headers["cache-control"] == "no-cache"
+
+
+# --------------------------------------------------------------------------- #
+# effects (the mixer's fx.py, rendered per stem on the server)
+# --------------------------------------------------------------------------- #
+
+def fx_body(**stems):
+    return {"settings": {"stems": stems}}
+
+
+def test_effects_render_only_the_stems_that_have_them(client, wav_bytes):
+    sid = upload(client, wav_bytes)
+    r = client.post(f"/api/songs/{sid}/fx", json=fx_body(guitar={"drive": 0.6}, vocals={"reverb_db": -12}))
+    assert r.status_code == 200, r.text
+    urls = r.json()["stems"]
+    assert set(urls) == {"guitar", "vocals"}
+    guitar, _ = sf.read(io.BytesIO(client.get(urls["guitar"]).content), always_2d=True)
+    assert guitar.shape == (int(SR * SECONDS), 2)
+    # drive: odd harmonics of the guitar's 330 Hz (no stem plays 990 Hz)
+    assert tone_energy(guitar, FREQS["guitar"] * 3) > 0.02 * tone_energy(guitar, FREQS["guitar"])
+    vocals, _ = sf.read(io.BytesIO(client.get(urls["vocals"]).content), always_2d=True)
+    plain = client.get(f"/api/songs/{sid}/stems/vocals").content
+    assert not np.allclose(vocals, sf.read(io.BytesIO(plain), always_2d=True)[0], atol=1e-3)
+
+    # the same settings come from the cache; changing one stem leaves the other's file alone
+    assert client.post(f"/api/songs/{sid}/fx", json=fx_body(guitar={"drive": 0.6}, vocals={"reverb_db": -12})).json()["stems"] == urls
+    again = client.post(f"/api/songs/{sid}/fx", json=fx_body(guitar={"drive": 0.3}, vocals={"reverb_db": -12})).json()["stems"]
+    assert again["vocals"] == urls["vocals"] and again["guitar"] != urls["guitar"]
+    assert client.post(f"/api/songs/{sid}/fx", json=fx_body()).json()["stems"] == {}
+
+
+def test_effect_settings_are_clamped_and_paths_checked(client, wav_bytes, tmp_path):
+    from mixpipe.splitter import effects
+
+    s = effects.validate({"stems": {"guitar": {"drive": 5, "bass_db": -40, "reverb_db": 9}}})
+    assert s["stems"]["guitar"]["drive"] == 1.0 and s["stems"]["guitar"]["bass_db"] == -12.0
+    assert s["stems"]["guitar"]["reverb_db"] == 0.0 and s["send_buses"]["reverb"]["room_size"] > 0
+    sid = upload(client, wav_bytes)
+    assert client.get(f"/api/songs/{sid}/fx/orig/..%2Fmeta.json").status_code == 404
+    assert client.get(f"/api/songs/{sid}/fx/nope/guitar-0123456789abcdef.flac").status_code == 404
+    assert client.post(f"/api/songs/{sid}/fx", json={"version": "x070+00", "quality": "fine"}).status_code == 404
+    assert client.post(f"/api/songs/{sid}/fx", json={"version": "x070+00", "quality": "best"}).status_code == 400
+
+
+def test_downloads_include_the_effects(client, wav_bytes):
+    sid = upload(client, wav_bytes)
+    fxs = {"stems": {"guitar": {"drive": 0.8}}}
+    dry = client.post(f"/api/songs/{sid}/stems/guitar/render", json={})
+    wet = client.post(f"/api/songs/{sid}/stems/guitar/render", json={"fx": fxs})
+    a, _ = sf.read(io.BytesIO(dry.content), always_2d=True)
+    b, _ = sf.read(io.BytesIO(wet.content), always_2d=True)
+    assert tone_energy(b, FREQS["guitar"] * 3) > 20 * tone_energy(a, FREQS["guitar"] * 3)
+    mix = client.post(f"/api/songs/{sid}/render", json={"gains": {}, "fx": fxs})
+    m, _ = sf.read(io.BytesIO(mix.content), always_2d=True)
+    assert tone_energy(m, FREQS["guitar"] * 3) > 0.01 * tone_energy(m, FREQS["guitar"])
+
+
+def test_old_effect_renders_are_pruned(tmp_path):
+    from mixpipe.splitter import effects
+
+    folder = tmp_path / "fx" / "orig"
+    folder.mkdir(parents=True)
+    for i in range(effects.KEEP + 5):
+        (folder / f"guitar-{i:016x}.flac").write_bytes(b"x")
+    effects.prune(tmp_path)
+    assert len(list(folder.iterdir())) == effects.KEEP
+
+
+# --------------------------------------------------------------------------- #
+# takes: recordings over the backing, kept like stems
+# --------------------------------------------------------------------------- #
+
+def burst_at(seconds: float, at: float, f: float = 990.0) -> np.ndarray:
+    """A recording: silence, then a 0.2 s tone at `at` seconds."""
+    y = np.zeros(int(SR * seconds), dtype=np.float32)
+    a = int(SR * at)
+    t = np.arange(int(SR * 0.2)) / SR
+    y[a:a + len(t)] = 0.5 * np.sin(2 * np.pi * f * t)
+    return np.stack([y, y], axis=1)
+
+
+def onset(audio: np.ndarray) -> float:
+    return int(np.argmax(np.abs(audio[:, 0]) > 0.05)) / SR
+
+
+def add_take(client, sid, wav_bytes, recording, **fields):
+    form = {"start_s": "0", "speed": "1", "semitones": "0", "latency_ms": "0", **{k: str(v) for k, v in fields.items()}}
+    return client.post(f"/api/songs/{sid}/takes", data=form,
+                       files={"file": ("take.wav", wav_bytes(recording, SR), "audio/wav")})
+
+
+def test_a_take_is_placed_on_the_song_and_nudged(client, wav_bytes):
+    sid = upload(client, wav_bytes)
+    r = add_take(client, sid, wav_bytes, burst_at(1.0, 0.3), start_s=0.5, latency_ms=100)
+    assert r.status_code == 200, r.text
+    assert r.json()["n"] == 1 and client.get(f"/api/songs/{sid}").json()["takes"][0]["name"] == "Take 1"
+    take, _ = sf.read(io.BytesIO(client.get(f"/api/songs/{sid}/takes/1").content), always_2d=True)
+    assert take.shape == (int(SR * SECONDS), 2)                  # as long as the song, like a stem
+    assert onset(take) == pytest.approx(0.5 + 0.3 - 0.1, abs=0.005)   # where it was played
+
+    assert client.patch(f"/api/songs/{sid}/takes/1", json={"ms": 50}).status_code == 200
+    take, _ = sf.read(io.BytesIO(client.get(f"/api/songs/{sid}/takes/1").content), always_2d=True)
+    assert onset(take) == pytest.approx(0.75, abs=0.005)
+    assert client.patch(f"/api/songs/{sid}/takes/7", json={"ms": 5}).status_code == 404
+
+
+def test_takes_are_in_the_downloads_and_can_be_deleted(client, wav_bytes, tmp_path):
+    import zipfile
+
+    sid = upload(client, wav_bytes)
+    add_take(client, sid, wav_bytes, burst_at(1.0, 0.2), start_s=0.3)
+    silent = {n: 0 for n in STEM_NAMES}
+    mix, _ = sf.read(io.BytesIO(client.post(f"/api/songs/{sid}/render", json={"gains": {**silent, "take:1": 1}}).content),
+                     always_2d=True)
+    assert onset(mix) == pytest.approx(0.5, abs=0.005) and tone_energy(mix, 990) > 0.01
+    without, _ = sf.read(io.BytesIO(client.post(f"/api/songs/{sid}/render", json={"gains": silent}).content), always_2d=True)
+    assert tone_energy(without, 990) < 1e-4                      # a take is only in when asked for
+    assert client.post(f"/api/songs/{sid}/render", json={"gains": {"take:9": 1}}).status_code == 400
+    alone = client.post(f"/api/songs/{sid}/stems/take:1/render", json={})
+    assert alone.status_code == 200 and "-take:1" not in alone.headers["content-disposition"]
+    assert client.post(f"/api/songs/{sid}/stems/take:9/render", json={}).status_code == 404
+    with zipfile.ZipFile(io.BytesIO(client.post(f"/api/songs/{sid}/stems.zip", json={}).content)) as zf:
+        assert f"{sid}-take1.flac" in zf.namelist()
+
+    assert client.delete(f"/api/songs/{sid}/takes/1").status_code == 200
+    assert client.get(f"/api/songs/{sid}").json()["takes"] == []
+    assert not any((tmp_path / sid / "takes").glob("1*"))
+    assert client.get(f"/api/songs/{sid}/takes/1").status_code == 404
+    assert client.post(f"/api/songs/{sid}/takes", data={}).status_code == 400
+
+
+@needs_rubberband
+def test_a_take_recorded_slower_is_kept_at_the_songs_speed(client, wav_bytes):
+    sid = upload(client, wav_bytes)
+    # played at 50%: 0.6 s into the recording is 0.3 s of the song
+    r = add_take(client, sid, wav_bytes, burst_at(1.5, 0.6), start_s=0.2, speed=0.5)
+    assert r.status_code == 200, r.text
+    take, _ = sf.read(io.BytesIO(client.get(f"/api/songs/{sid}/takes/1").content), always_2d=True)
+    assert onset(take) == pytest.approx(0.5, abs=0.03)
+    slow, _ = sf.read(io.BytesIO(client.get(f"/api/songs/{sid}/takes/1?version=x050%2B00&quality=fast").content),
+                      always_2d=True)
+    assert len(slow) == pytest.approx(2 * SR * SECONDS, abs=2) and onset(slow) == pytest.approx(1.0, abs=0.05)

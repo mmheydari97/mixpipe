@@ -76,7 +76,8 @@ def _record_cap(root: Path, model: str, timing: str) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _write_mono(path: Path, audio: np.ndarray, sr: int) -> None:
+def write_mono(path: Path, audio: np.ndarray, sr: int) -> None:
+    """Mono 16-bit FLAC: the separated/ cache's format (the splitter seeds it too)."""
     import soundfile as sf
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -287,7 +288,7 @@ def _sources(song_dir: Path, ing: Ingested, separate: bool, separator, report):
         stems = separator(ing.mix, ing.sr,
                           progress=lambda f: report("separate", f, "separating"))
         for st in stems:
-            _write_mono(sep_dir / f"{st.name}.flac", st.audio, ing.sr)
+            write_mono(sep_dir / f"{st.name}.flac", st.audio, ing.sr)
     vocal = _read_mono(sep_dir / "vocals.flac")
     bass = _read_mono(sep_dir / "bass.flac")
     report("separate", 1.0, "separated")

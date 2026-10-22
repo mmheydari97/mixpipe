@@ -103,6 +103,21 @@ class SettingsIn(BaseModel):
     instrument: str | None = None
 
 
+def chords_service(root: str | Path = pipeline.DEFAULT_ROOT, run_inline: bool = False,
+                   workers: int = 1, **inject) -> SongService:
+    """The chord finder's song store and job queue. The chord finder's page uses
+    it, and so does the splitter (its songs' chords, key and beats); `inject`
+    passes fakes (separator, transcriber, ...) to pipeline.run_job."""
+    root = Path(root)
+
+    def job(d: Path, options: dict):
+        return pipeline.run_job(d, options, cancelled=svc.cancelled(d.name), root=root, **inject)
+
+    svc = SongService(root, job, done_file="sheet.json", done_stage="align",
+                      run_inline=run_inline, name="chords", workers=workers)
+    return svc
+
+
 def create_app(
     root: str | Path = pipeline.DEFAULT_ROOT,
     separator=None,
@@ -121,16 +136,10 @@ def create_app(
     root = Path(root)
     app = FastAPI(title="mixpipe chords")
     sheet_lock = threading.Lock()
-
-    def job(d: Path, options: dict):
-        return pipeline.run_job(d, options, cancelled=svc.cancelled(d.name),
-                                separator=separator, transcriber=transcriber,
-                                root=root, downloader=downloader,
-                                melody_extractor=melody_extractor, retimer=retimer,
-                                neural_provider=neural_provider)
-
-    svc = SongService(root, job, done_file="sheet.json", done_stage="align",
-                      run_inline=run_inline, name="chords", workers=workers)
+    svc = chords_service(root, run_inline, workers, separator=separator, transcriber=transcriber,
+                         downloader=downloader, melody_extractor=melody_extractor,
+                         retimer=retimer, neural_provider=neural_provider)
+    app.state.songs = svc            # the hub hands it to the splitter, so both use one queue
     song_dir, sheet_path = svc.song_dir, svc.result_path
     add_song_routes(app, svc, parse_options, resolver=resolver)
 

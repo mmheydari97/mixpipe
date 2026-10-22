@@ -521,3 +521,195 @@ def test_openrouter_ids_go_to_openrouter(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY")
     # a Claude id is not an OpenRouter id: without the Anthropic key, OpenRouter's default is used
     assert llm_choice(cfg, model="claude-sonnet-4-6") == ("openrouter", cfg["advisor"]["openrouter_model"])
+
+
+# --------------------------------------------------------------------------- #
+# tempo and key (the shared stretch.py, as the splitter uses it)
+# --------------------------------------------------------------------------- #
+
+needs_rubberband = pytest.mark.skipif(
+    __import__("shutil").which("rubberband") is None, reason="needs the rubberband tool")
+
+
+def test_speed_and_key_adjustments(base):
+    cfg, stems, plan = base
+    out, rejected = apply_adjustments(plan, stems, [
+        {"target": "master", "param": "speed_pct", "delta": -10},
+        {"target": "master", "param": "semitones", "delta": 2}], cfg)
+    assert not rejected
+    assert out["master"]["speed"] == pytest.approx(0.9) and out["master"]["semitones"] == 2
+    texts = [c["text"] for c in diff_plans(plan, out)]
+    assert "speed 100% -> 90%" in texts and "key +0 -> +2 st" in texts
+
+    out, _ = apply_adjustments(plan, stems, [
+        {"target": "master", "param": "speed_pct", "value": 1000},     # clamped to Rubber Band's 300%
+        {"target": "master", "param": "semitones", "value": -40.4}], cfg)
+    assert out["master"]["speed"] == 3.0 and out["master"]["semitones"] == -12
+    out, _ = apply_adjustments(plan, stems, [{"target": "master", "param": "speed_pct", "delta": -500}], cfg)
+    assert out["master"]["speed"] == pytest.approx(0.5)              # one step is at most 50 points
+
+
+@pytest.mark.parametrize("message,speed,semitones", [
+    ("make it a little slower", 0.95, 0),
+    ("slower", 0.9, 0),
+    ("much faster", 1.2, 0),
+    ("10% slower", 0.9, 0),
+    ("play it at 80%", 0.8, 0),
+    ("at 90 bpm", 0.9, 0),            # the demo session is 100 BPM
+    ("half time", 0.5, 0),
+    ("up a semitone", 1.0, 1),
+    ("down 2 semitones", 1.0, -2),
+    ("a whole step higher", 1.0, 2),
+    ("slower, and up a semitone", 0.9, 1),
+])
+def test_keyword_tempo_and_key(base, message, speed, semitones):
+    cfg, stems, plan = base
+    out = revise_plan(message, plan, stems, cfg, use_llm=False, tempo_bpm=100.0)
+    assert out["plan"]["master"]["speed"] == pytest.approx(speed), out["reply"]
+    assert out["plan"]["master"]["semitones"] == semitones, out["reply"]
+    assert not out["not_understood"], out["reply"]
+
+
+def test_speed_up_the_drums_is_tempo_not_level(base):
+    cfg, stems, plan = base
+    out = revise_plan("speed up the drums", plan, stems, cfg, use_llm=False)
+    assert out["plan"]["master"]["speed"] == pytest.approx(1.1)
+    assert out["plan"]["stems"]["drums"]["fader_db"] == plan["stems"]["drums"]["fader_db"]
+
+
+def test_a_bpm_target_needs_the_tempo(base):
+    cfg, stems, plan = base
+    out = revise_plan("at 90 bpm", plan, stems, cfg, use_llm=False, tempo_bpm=None)
+    assert not out["changes"] and "isn't known" in out["reply"]
+
+
+def test_the_model_gets_the_tempo(base):
+    cfg, stems, plan = base
+    llm = fake_llm({"reply": "Slowing it to 90 BPM.",
+                    "adjustments": [{"target": "master", "param": "speed_pct", "value": 90}]})
+    out = revise_plan("make it 90 bpm", plan, stems, cfg, llm=llm, tempo_bpm=100.0)
+    assert llm.calls[0]["tempo"] == {"bpm_as_recorded": 100.0, "speed_pct": 100.0,
+                                     "bpm_now": 100.0, "semitones": 0}
+    assert out["plan"]["master"]["speed"] == pytest.approx(0.9)
+    assert "Tempo" in __import__("mixpipe.advisor", fromlist=["REVISE_PROMPT"]).REVISE_PROMPT
+
+
+def test_session_measures_the_tempo(session):
+    assert session.tempo_bpm == pytest.approx(100.0, abs=2.0)
+
+
+@needs_rubberband
+def test_slower_and_higher_render_and_export(session, tmp_path):
+    from mixpipe.analysis import true_peak_db
+    from mixpipe.io_utils import read_audio
+    from mixpipe.timing import estimate_tempo_bpm
+
+    v1 = session.first_mix()
+    v2 = session.chat("10% slower")
+    assert v2["changes"][0]["text"] == "speed 100% -> 90%"
+    audio, sr = read_audio(v2["wav"])
+    music = session.stems[0].n_samples / session.stems[0].sr     # the reverb tail isn't stretched
+    longer = v1["output"]["duration_s"] + music * (1 / 0.9 - 1)
+    assert len(audio) / sr == pytest.approx(longer, abs=0.05)
+    assert estimate_tempo_bpm(audio.mean(axis=1), sr) == pytest.approx(90.0, abs=2.0)
+    # the balance survives the stretch (stretch_stems keeps each stem's loudness);
+    # within 1 dB, because softened drum hits meet the drums' compressor differently
+    for name, lv in v1["levels"].items():
+        if lv is not None and v2["levels"][name] is not None:
+            assert abs(v2["levels"][name] - lv) < 1.0, name
+    assert true_peak_db(audio) <= v2["plan"]["master"]["ceiling_db"] + 0.05
+
+    stretched = session._stretched["preview"]
+    v3 = session.chat("the bass is too loud")            # same speed: nothing stretched again
+    assert session._stretched["preview"] is stretched
+    assert v3["plan"]["master"]["speed"] == pytest.approx(0.9)
+
+    v4 = session.chat("up 2 semitones")
+    assert v4["plan"]["master"]["semitones"] == 2 and session._stretched["preview"] is not stretched
+    out = session.export(str(tmp_path / "slow.wav"))
+    full, sr = read_audio(out)
+    assert len(full) / sr == pytest.approx(longer, abs=0.05)
+    assert session.summary()["master"]["speed"] == pytest.approx(0.9)
+
+
+def test_without_rubber_band_tempo_stays(session, monkeypatch):
+    from mixpipe import stretch
+
+    def missing(semitones):
+        raise stretch.StretchError("changing speed needs ffmpeg: brew install ffmpeg")
+
+    monkeypatch.setattr(stretch, "check_available", missing)
+    session.first_mix()
+    turn = session.chat("slower")
+    assert turn["n"] is None and "Tempo and key stay as they are" in turn["reply"]
+    assert len(session.versions) == 1
+
+
+# --------------------------------------------------------------------------- #
+# effects (fx.py, shared with the splitter)
+# --------------------------------------------------------------------------- #
+
+def test_effect_adjustments_and_chips(base):
+    cfg, stems, plan = base
+    out, rejected = apply_adjustments(plan, stems, [
+        {"target": "electric_lead", "param": "drive", "value": 0.4},
+        {"target": "keys_pad", "param": "chorus", "delta": 0.5},
+        {"target": "acoustic_gtr", "param": "bass_db", "delta": -3},
+        {"target": "master", "param": "reverb_size", "delta": 0.2},
+        {"target": "master", "param": "delay_sync", "value": "1/8d"},
+        {"target": "master", "param": "delay_feedback", "value": 0.5}], cfg)
+    assert not rejected
+    assert out["stems"]["electric_lead"]["drive"]["amount"] == pytest.approx(0.4)
+    assert out["stems"]["keys_pad"]["chorus"]["mix"] == pytest.approx(0.5)
+    assert out["stems"]["acoustic_gtr"]["eq"][-1] == {"type": "low_shelf", "freq": 120.0, "gain_db": -3.0, "q": 0.7}
+    assert out["send_buses"]["delay"]["sync"] == "1/8d"
+    texts = [c["text"] for c in diff_plans(plan, out)]
+    for chip in ("electric_lead drive off -> 0.40", "keys_pad chorus off -> 0.50",
+                 "acoustic_gtr EQ -3.0 dB low shelf at 120 Hz", "echo time free -> 1/8d note",
+                 "echo repeats 0.25 -> 0.50"):
+        assert chip in texts, texts
+    assert any(t.startswith("reverb size") for t in texts)
+
+    bad, rejected = apply_adjustments(plan, stems, [{"target": "master", "param": "delay_sync", "value": "1/5"}], cfg)
+    assert rejected == ["master delay_sync"]
+    timed, _ = apply_adjustments(out, stems, [{"target": "master", "param": "delay_ms", "value": 300}], cfg)
+    assert timed["send_buses"]["delay"]["sync"] == "" and timed["send_buses"]["delay"]["delay_ms"] == 300
+
+
+@pytest.mark.parametrize("message,check", [
+    ("make the lead guitar gritty", lambda p: p["stems"]["electric_lead"]["drive"]["amount"] == 0.25),
+    ("a little chorus on the keys", lambda p: 0 < p["stems"]["keys_pad"]["chorus"]["mix"] < 0.35),
+    ("more bass on the acoustic guitar", lambda p: p["stems"]["acoustic_gtr"]["eq"][-1]["type"] == "low_shelf"),
+    ("less treble on the vocals", lambda p: p["stems"]["vocal_lead"]["eq"][-1]["gain_db"] == -3.0),
+    ("bigger room", lambda p: p["send_buses"]["reverb"]["room_size"] > 0.6),
+    ("dotted eighth note delay", lambda p: p["send_buses"]["delay"]["sync"] == "1/8d"),
+    ("more repeats", lambda p: p["send_buses"]["delay"]["feedback"] > 0.3),
+])
+def test_keyword_effects(base, message, check):
+    cfg, stems, plan = base
+    out = revise_plan(message, plan, stems, cfg, use_llm=False)
+    assert out["changes"] and check(out["plan"]), out["reply"]
+
+
+def test_more_bass_alone_is_still_the_bass_stem(base):
+    cfg, stems, plan = base
+    out = revise_plan("more bass", plan, stems, cfg, use_llm=False)
+    assert [c["text"] for c in out["changes"]] == ["bass +3.0 dB"]
+
+
+def test_too_distorted_backs_the_drive_off(base):
+    cfg, stems, plan = base
+    gritty = revise_plan("make the lead guitar very gritty", plan, stems, cfg, use_llm=False)["plan"]
+    out = revise_plan("the lead guitar is too distorted", gritty, stems, cfg, use_llm=False)
+    assert out["plan"]["stems"]["electric_lead"]["drive"]["amount"] < gritty["stems"]["electric_lead"]["drive"]["amount"]
+
+
+def test_drive_is_heard_in_the_render(session):
+    v1 = session.first_mix()
+    v2 = session.chat("make the lead guitar gritty")
+    assert v2["n"] == 2 and "drive" in v2["changes"][0]["text"]
+    from mixpipe.io_utils import read_audio
+
+    a, _ = read_audio(v1["wav"])
+    b, _ = read_audio(v2["wav"])
+    assert a.shape == b.shape and not np.allclose(a, b, atol=1e-3)

@@ -18,6 +18,9 @@ function route() {
   const m = location.hash.match(/^#\/s\/([\w-]+)/);
   clearTimeout(pollTimer);
   stopAudio();
+  // #/new?splitter_song=<id>: the splitter's "Mix these stems" link
+  const pick = location.hash.match(/^#\/new\?splitter_song=([^&]+)/);
+  if (pick) { chosenSplitterSong = decodeURIComponent(pick[1]); tab = "splitter"; }
   if (m) { show("session"); openSession(m[1]); } else { show("start"); loadStart(); }
 }
 function show(name) { for (const [k, v] of Object.entries(views)) v.hidden = k !== name; }
@@ -185,7 +188,7 @@ const cur = () => current.versions.find((v) => v.n === current.current);
 
 function chatEntry(v) {
   const user = v.message && v.message !== "(first mix)" && v.source !== "manual"
-    ? el("li", { class: "msg-user" }, v.message) : null;
+    ? el("li", { class: "msg-user" }, v.kind === "ai" ? `AI edit: ${v.message}` : v.message) : null;
   const chips = (v.changes || []).map((c) => el("span", { class: "chip" }, c.text));
   const src = v.source || "";
   const byModel = src.startsWith("chat:llm") || src.startsWith("llm");
@@ -213,18 +216,22 @@ function renderSuggestions(st) {
   const ac = pick(/acoustic|guitar|gtr/i), vox = pick(/vocal|vox|voice/i), bass = pick(/bass/i);
   if (ac) ideas.push(`the ${ac.replace(/_/g, " ")} is too loud`);
   if (vox) ideas.push("more reverb on the vocals", "vocals up a little");
+  ideas.push("a little slower");
   if (bass) ideas.push("the bass is boomy");
   ideas.push("it sounds muddy", "make it louder overall");
   $("#suggestions").replaceChildren(...ideas.slice(0, 5).map((t) =>
     el("button", { class: "chip suggestion", onclick: () => { $("#chat-input").value = t; $("#chat-input").focus(); } }, t)));
 }
 
-$("#chat-form").addEventListener("submit", async (e) => {
+$("#chat-form").addEventListener("submit", (e) => {
   e.preventDefault();
-  const input = $("#chat-input");
-  const message = input.value.trim();
+  const message = $("#chat-input").value.trim();
   if (!message || !sessionId) return;
-  input.value = "";
+  if (engine === "ai") aiEdit(message); else mixTurn(message);
+});
+
+async function mixTurn(message) {
+  $("#chat-input").value = "";
   const log = $("#chat-log");
   log.append(el("li", { class: "msg-user" }, message));
   const thinking = el("li", { class: "msg-bot thinking" },
@@ -240,26 +247,74 @@ $("#chat-form").addEventListener("submit", async (e) => {
   } catch (err) {
     thinking.replaceWith(el("li", { class: "msg-bot error" }, err.message));
   } finally { setBusy(false); scrollChat(); }
-});
-
-// ------------------------------------------------------------------ model
-
-async function renderModelControl(st) {
-  const btn = $("#model-btn");
-  btn.textContent = st.llm ? `Model: ${shortModel(st.llm.model)} ▾` : "Keyword rules ▾";
-  btn.title = st.llm ? `${st.llm.provider}: ${st.llm.model}` : "Your messages are read by the keyword rules";
-  let canSwitch = false;
-  try { canSwitch = !!(await getConfig()).openrouter?.has_key; } catch { /* stays off */ }
-  btn.disabled = !canSwitch;
-  if (!canSwitch) btn.textContent = btn.textContent.replace(" ▾", "");
-  if (sessionModelPicker) sessionModelPicker.set(st.llm?.provider === "openrouter" ? st.llm.model : null);
 }
 
-function toggleModelPanel(open) {
-  const panel = $("#model-panel");
-  panel.hidden = !open;
-  $("#model-btn").setAttribute("aria-expanded", String(open));
-  if (open && !sessionModelPicker) {
+// ------------------------------------------------------------------ who answers (the gear)
+
+// "mix": the message changes the plan (OpenRouter model or keyword rules);
+// "ai": the message is a prompt for ACE-Step, which rewrites the audio
+const ENGINE_KEY = "mixer.engine";
+let engine = store.get(ENGINE_KEY) === "ai" ? "ai" : "mix";
+let aiStatus = null;
+
+function setEngine(name) {
+  engine = name;
+  store.set(ENGINE_KEY, name);
+  renderEngine();
+}
+
+function renderEngine() {
+  const ai = engine === "ai";
+  const btn = $("#engine-btn");
+  $("#engine-label").textContent = ai ? "AI edit · ACE-Step (local)"
+    : current?.llm ? `Mix · ${shortModel(current.llm.model)}` : "Mix · keyword rules";
+  btn.classList.toggle("ai", ai);
+  btn.title = ai ? "Your messages are prompts for ACE-Step on this machine"
+    : current?.llm ? `Your messages change the mix, read by ${current.llm.provider}: ${current.llm.model}`
+    : "Your messages change the mix, read by the keyword rules";
+  document.querySelectorAll('input[name="engine"]').forEach((r) => { r.checked = r.value === engine; });
+  $("#engine-mix-settings").hidden = ai;
+  $("#engine-ai-settings").hidden = !ai;
+  $("#ai-options").hidden = !ai;
+  $("#suggestions").hidden = ai;
+  $("#chat-input").placeholder = ai ? "Describe the music you want, e.g. warm cello and strings swell"
+    : "e.g. the acoustic guitar is too loud";
+  $("#chat-send").textContent = ai ? "Edit with AI" : "Send";
+  renderAiStatus();
+}
+
+function renderAiStatus() {
+  const badge = $("#ai-status");
+  const note = $("#engine-ai-settings");
+  if (!aiStatus) { badge.textContent = ""; note.textContent = "Checking for ACE-Step…"; return; }
+  badge.textContent = aiStatus.ok ? "running" : "not running";
+  badge.className = `badge ${aiStatus.ok ? "ok" : "err"}`;
+  note.textContent = aiStatus.ok
+    ? `ACE-Step ${aiStatus.model || ""} is running at ${aiStatus.url}. Pick a range or "Re-style all of it" above the message box.`
+    : `ACE-Step isn't running at ${aiStatus.url}. Start it with make studio (or make acestep), then reopen this panel.`;
+}
+
+async function checkAiStatus() {
+  try { aiStatus = await api("/api/ai-edit/status"); } catch { aiStatus = null; }
+  renderAiStatus();
+}
+
+async function renderModelControl(st) {
+  let hasKey = false;
+  try { hasKey = !!(await getConfig()).openrouter?.has_key; } catch { /* stays off */ }
+  $("#session-model-picker").hidden = !hasKey;
+  $("#model-rules").hidden = !hasKey || !st.llm;
+  $("#no-key-note").hidden = hasKey;
+  if (sessionModelPicker) sessionModelPicker.set(st.llm?.provider === "openrouter" ? st.llm.model : null);
+  renderEngine();
+}
+
+function toggleEnginePanel(open) {
+  $("#engine-panel").hidden = !open;
+  $("#engine-btn").setAttribute("aria-expanded", String(open));
+  if (!open) return;
+  checkAiStatus();
+  if (!sessionModelPicker && appConfig?.openrouter?.has_key) {
     sessionModelPicker = createModelPicker($("#session-model-picker"), "chat", {
       placeholder: MODEL_PLACEHOLDER, storeKey: MODEL_KEY,
       value: current?.llm?.provider === "openrouter" ? current.llm.model : null,
@@ -267,10 +322,11 @@ function toggleModelPanel(open) {
       onChange: (id) => switchModel(id),
     });
   }
-  if (open) $("#session-model-picker input")?.focus();
 }
-$("#model-btn").addEventListener("click", () => toggleModelPanel($("#model-panel").hidden));
-$("#model-close").addEventListener("click", () => toggleModelPanel(false));
+$("#engine-btn").addEventListener("click", () => toggleEnginePanel($("#engine-panel").hidden));
+$("#engine-close").addEventListener("click", () => toggleEnginePanel(false));
+document.querySelectorAll('input[name="engine"]').forEach((r) =>
+  r.addEventListener("change", () => { if (r.checked) setEngine(r.value); }));
 $("#model-rules").addEventListener("click", () => switchModel(null));
 
 async function switchModel(id) {
@@ -279,7 +335,6 @@ async function switchModel(id) {
   try {
     renderSession(await api(`/api/sessions/${sessionId}/model`, jsonBody("POST", { model: id })));
     alertLine(id ? `Switched to ${id}. It answers from your next message on.` : "Switched to the keyword rules.", "note");
-    toggleModelPanel(false);
   } catch (e) {
     alertLine(e.message);
     sessionModelPicker?.set(before?.provider === "openrouter" ? before.model : null);
@@ -287,7 +342,7 @@ async function switchModel(id) {
 }
 
 function setBusy(b) {
-  for (const id of ["#chat-send", "#undo-btn", "#redo-btn", "#export-btn", "#model-rules", "#ai-send"]) $(id).disabled = b;
+  for (const id of ["#chat-send", "#undo-btn", "#redo-btn", "#export-btn", "#model-rules"]) $(id).disabled = b;
   $("#chat-input").disabled = b;
   document.querySelectorAll(".channels input").forEach((i) => { i.disabled = b; });
 }
@@ -298,8 +353,9 @@ function renderVersions(st) {
   const ol = $("#version-list");
   ol.replaceChildren(...[...st.versions].reverse().map((v) => el("li", { class: v.n === st.current ? "on" : "" },
     el("button", { class: "link", onclick: () => gotoVersion(v.n) }, `v${v.n}`),
-    v.kind === "ai" ? el("span", { class: "badge ai", title: `AI edit of v${v.parent}; its plan is v${v.base}'s` }, "AI") : "",
-    el("span", { class: "vmsg" }, v.source === "manual" ? (v.changes || []).map((c) => c.text).join("; ") : v.message),
+    el("span", { class: "vmsg" },
+      v.kind === "ai" ? el("span", { class: "badge ai", title: `AI edit of v${v.parent}; its plan is v${v.base}'s` }, "AI") : "",
+      v.source === "manual" ? (v.changes || []).map((c) => c.text).join("; ") : v.message),
     el("span", { class: "muted small" }, v.output?.lufs != null ? `${v.output.lufs.toFixed(1)} LUFS` : ""))));
   const sel = $("#ab-b-select");
   const prevB = sel.value;
@@ -335,12 +391,8 @@ $("#export-btn").addEventListener("click", async () => {
   msg.textContent = ai ? "Writing the AI edit…" : current.preview ? "Rendering the whole song…" : "Rendering…";
   setBusy(true);
   try {
-    const res = await fetch(`/api/sessions/${sessionId}/export`, jsonBody("POST", { bit_depth: depth, full: true }));
-    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
-    const blob = await res.blob();
-    const name = (res.headers.get("content-disposition") || "").match(/filename="?([^"]+)"?/)?.[1] || "mix.wav";
-    const a = el("a", { href: URL.createObjectURL(blob), download: name });
-    document.body.append(a); a.click(); a.remove();
+    const name = await downloadFile(`/api/sessions/${sessionId}/export`,
+      jsonBody("POST", { bit_depth: depth, full: true }), "mix.wav");
     msg.textContent = ai && current.preview
       ? `Saved ${name}. An AI edit is the length of the preview it was made from.` : `Saved ${name}.`;
   } catch (e) { msg.textContent = e.message; } finally { setBusy(false); }
@@ -391,21 +443,20 @@ function renderStats() {
     item("Loudness", o.lufs != null ? `${o.lufs.toFixed(1)} LUFS` : "–", "Integrated loudness of this version"),
     item("True peak", o.true_peak_db != null ? `${o.true_peak_db.toFixed(1)} dBTP` : "–"),
     item("Crest", o.crest_db != null ? `${o.crest_db.toFixed(1)} dB` : "–", "Peak to RMS: lower is more squashed"),
-    item("Stereo", o.lr_correlation != null ? o.lr_correlation.toFixed(2) : "–", "L/R correlation: 1 is mono, below 0 has phase problems"));
+    item("Stereo", o.lr_correlation != null ? o.lr_correlation.toFixed(2) : "–", "L/R correlation: 1 is mono, below 0 has phase problems"),
+    item("Tempo", `${Math.round(speedOf(cur()?.n) * 100)}%` + (current.tempo_bpm
+      ? ` · ${Math.round(current.tempo_bpm * speedOf(cur()?.n))} BPM` : ""), "Speed of this version (100% = as recorded)"),
+    item("Key", semitonesOf(cur()?.n) ? `${semitonesOf(cur()?.n) > 0 ? "+" : ""}${semitonesOf(cur()?.n)} st` : "as recorded",
+      "Semitones this version moves the whole song"));
 }
 
 // ------------------------------------------------------------------ AI edit
 
-let aiMode = "repaint";
-function setAiMode(mode) {
-  aiMode = mode;
-  $("#ai-tab-repaint").setAttribute("aria-selected", String(mode === "repaint"));
-  $("#ai-tab-cover").setAttribute("aria-selected", String(mode === "cover"));
-  $("#ai-range").hidden = mode !== "repaint";
-  $("#ai-strength-row").hidden = mode !== "cover";
-}
-$("#ai-tab-repaint").addEventListener("click", () => setAiMode("repaint"));
-$("#ai-tab-cover").addEventListener("click", () => setAiMode("cover"));
+const aiMode = () => document.querySelector('input[name="ai-mode"]:checked').value;
+document.querySelectorAll('input[name="ai-mode"]').forEach((r) => r.addEventListener("change", () => {
+  $("#ai-range").hidden = aiMode() !== "repaint";
+  $("#ai-strength-row").hidden = aiMode() !== "cover";
+}));
 $("#ai-strength").addEventListener("input", () => { $("#ai-strength-val").textContent = $("#ai-strength").value; });
 $("#ai-start-here").addEventListener("click", () => { $("#ai-start").value = fmtClock(A.currentTime); });
 $("#ai-end-here").addEventListener("click", () => { $("#ai-end").value = fmtClock(A.currentTime); });
@@ -420,37 +471,26 @@ function parseClock(text) {
   return (m[1] ? Number(m[1]) * 60 : 0) + Number(m[2]);
 }
 
-async function checkAiStatus() {
-  const badge = $("#ai-status");
+async function aiEdit(prompt) {
+  const mode = aiMode();
+  const body = { prompt, mode };
   try {
-    const st = await api("/api/ai-edit/status");
-    badge.textContent = st.ok ? `ACE-Step: ${st.model || "ready"}` : "ACE-Step not running";
-    badge.className = `badge ${st.ok ? "ok" : "err"}`;
-    badge.title = st.ok ? st.url : `Start it with \`make acestep\` (${st.url})`;
-  } catch { badge.textContent = ""; }
-}
-
-$("#ai-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const prompt = $("#ai-prompt").value.trim();
-  if (!prompt || !sessionId) return;
-  const body = { prompt, mode: aiMode };
-  try {
-    if (aiMode === "repaint") { body.start = parseClock($("#ai-start").value) ?? 0; body.end = parseClock($("#ai-end").value); }
+    if (mode === "repaint") { body.start = parseClock($("#ai-start").value) ?? 0; body.end = parseClock($("#ai-end").value); }
     else body.strength = Number($("#ai-strength").value);
   } catch (err) { alertLine(err.message); return; }
+  $("#chat-input").value = "";
   const from = versionA ?? current.current;
   if (from !== current.current) {
     // the edit is made from the version being listened to
     try { renderSession(await api(`/api/sessions/${sessionId}/goto/${from}`, { method: "POST" })); }
     catch (err) { alertLine(err.message); return; }
   }
-  const what = aiMode === "repaint"
-    ? `Repaint ${fmtClock(body.start)}–${body.end != null ? fmtClock(body.end) : "end"} of v${from}: ${prompt}`
-    : `Re-style v${from} (strength ${body.strength}): ${prompt}`;
+  const what = mode === "repaint"
+    ? `AI edit · repaint ${fmtClock(body.start)}–${body.end != null ? fmtClock(body.end) : "end"} of v${from}: ${prompt}`
+    : `AI edit · re-style v${from} (strength ${body.strength}): ${prompt}`;
   const log = $("#chat-log");
   log.append(el("li", { class: "msg-user" }, what));
-  const thinking = el("li", { class: "msg-bot thinking" }, "ACE-Step is making it (half a minute or so; the first edit also loads the model)…");
+  const thinking = el("li", { class: "msg-bot thinking" }, "ACE-Step is making it (about half a minute)…");
   log.append(thinking); scrollChat();
   setBusy(true);
   try {
@@ -462,7 +502,7 @@ $("#ai-form").addEventListener("submit", async (e) => {
     thinking.replaceWith(el("li", { class: "msg-bot error" }, err.message));
     checkAiStatus();
   } finally { setBusy(false); scrollChat(); }
-});
+}
 
 // ------------------------------------------------------------------ A/B player
 
@@ -478,7 +518,7 @@ function setupPlayer(st) {
   applyVolumes();
 }
 function loadInto(audio, n) {
-  const src = `/api/sessions/${sessionId}/audio/${n}.wav`;
+  const src = apiUrl(`/api/sessions/${sessionId}/audio/${n}.wav`);
   if (audio.dataset.src === src) return;
   const t = audio.currentTime || 0, playing = !A.paused;
   audio.dataset.src = src; audio.src = src;
@@ -493,6 +533,17 @@ $("#ab-b-select").addEventListener("change", () => {
   $("#ab-b-label").textContent = `v${versionB}`; applyVolumes();
 });
 function lufsOf(n) { return current?.versions.find((v) => v.n === n)?.output?.lufs; }
+const speedOf = (n) => current?.versions.find((v) => v.n === n)?.master?.speed || 1;
+const semitonesOf = (n) => current?.versions.find((v) => v.n === n)?.master?.semitones || 0;
+// A at tA and B at toB(tA) are at the same point of the song, whatever their speeds
+const toB = (tA) => (tA * speedOf(versionA)) / speedOf(versionB);
+const toA = (tB) => (tB * speedOf(versionB)) / speedOf(versionA);
+// the one you hear leads; the silent one follows it (at another speed it drifts)
+function syncFollower() {
+  if (A.paused) return;
+  const [follow, want] = active === "a" ? [B, toB(A.currentTime)] : [A, toA(B.currentTime)];
+  if (Math.abs(follow.currentTime - want) > 0.08) follow.currentTime = Math.min(want, follow.duration || want);
+}
 function applyVolumes() {
   // loudness-matched: turn the louder one down to the quieter one, so "louder" can't win the comparison
   let ga = 1, gb = 1;
@@ -516,7 +567,7 @@ $("#ab-b").addEventListener("click", () => setActive("b"));
 
 $("#play-btn").addEventListener("click", () => {
   if (A.paused) {
-    B.currentTime = A.currentTime;
+    B.currentTime = Math.min(toB(A.currentTime), B.duration || Infinity);
     Promise.all([A.play(), B.play()]).catch(() => {});
     $("#play-btn").textContent = "❚❚"; $("#play-btn").setAttribute("aria-label", "Pause");
   } else stopAudio(false);
@@ -526,8 +577,9 @@ function stopAudio(rewind = false) {
   if (rewind) { A.currentTime = 0; B.currentTime = 0; }
   $("#play-btn").textContent = "▶"; $("#play-btn").setAttribute("aria-label", "Play");
 }
+B.addEventListener("timeupdate", syncFollower);
 A.addEventListener("timeupdate", () => {
-  if (Math.abs(B.currentTime - A.currentTime) > 0.08 && !A.paused) B.currentTime = A.currentTime;
+  syncFollower();
   $("#seek").value = A.duration ? String(Math.round((A.currentTime / A.duration) * 1000)) : "0";
   $("#t-now").textContent = fmtTime(A.currentTime);
   $("#t-total").textContent = fmtTime(A.duration);
@@ -536,7 +588,7 @@ A.addEventListener("ended", () => stopAudio(true));
 $("#seek").addEventListener("input", () => {
   if (!A.duration) return;
   const t = (Number($("#seek").value) / 1000) * A.duration;
-  A.currentTime = t; B.currentTime = Math.min(t, B.duration || t);
+  A.currentTime = t; B.currentTime = Math.min(toB(t), B.duration || Infinity);
 });
 document.addEventListener("keydown", (e) => {
   if (views.session.hidden || e.target.closest("input, textarea, select")) return;

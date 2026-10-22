@@ -10,8 +10,17 @@ you rebalance them while you practise:
 - **change key** in semitone (one-fret) steps: +1 = ♯, +2 = ♯♯, −1 = ♭, up to an octave either way
 - **Fast** or **Accurate** stretching: the browser's instant one, or Rubber Band's much cleaner one
 - an **A–B loop** to repeat a section
-- **download** what you hear (e.g. the song without guitar) as MP3 or WAV,
-  at the speed and key you picked
+- the song's **key and tempo**, following your key and speed changes ("G minor · 122 BPM")
+- a **metronome** on the song's own beats and bars, and a one-bar **count-in** before
+  playing and before each loop pass
+- the song's **chords and lyrics**, named in the key you hear and following playback
+- **record yourself** over the backing: each take becomes a channel of its own, in sync at
+  any speed and key, and is in the downloads
+- **effects** per channel: bass, treble, drive, chorus, reverb and echo, in a shared
+  room whose size, decay, echo time (free, or a note value locked to the song's tempo)
+  and repeats you set
+- **download** what you hear (e.g. the song without guitar), any single stem, or
+  all six stems in a zip, as MP3, WAV or FLAC, at the speed and key you picked
 
 It's the reverse of MixPipe's mix/master pipeline, and a separate app from
 the [chord finder](../chords/README.md) (its own port and song folder). Both
@@ -99,13 +108,54 @@ M4 Pro, download included.
 - **Loop:** play to where the section starts and press **Set A**, then
   **Set B** where it ends. The loop switches on and shows as a band on the
   position bar. Untick *Loop A–B* to play through; *clear* removes it.
-- **Download this mix:** MP3 (256 kbps) or WAV with your current volumes,
-  mutes, solos, speed and key. The file name says what changed, e.g.
-  `song-no-guitar-70pct-up2st.mp3`. Downloads always use Rubber Band's clean
-  engine, even with *Fast* selected. If you're already hearing the clean
-  version, the download is instant. Otherwise it takes about 5 s per minute of song.
+- **Download:** pick MP3 (256 kbps), WAV or FLAC (16-bit, lossless), then
+  - **This mix**: your current volumes, mutes, solos, speed and key;
+  - **⤓** on a channel: that stem on its own at full level (the fader doesn't apply);
+  - **All stems (.zip)**: every stem at full level, one file each, for a DAW.
+
+  Each uses the current speed and key, and the file name says what changed, e.g.
+  `song-no-guitar-70pct-up2st.mp3` or `song-vocals-70pct.flac`. Downloads always use
+  Rubber Band's clean engine, even with *Fast* selected. If you're already hearing
+  the clean version, the download is instant; otherwise the mix takes about 5 s per
+  minute of song, and the zip stretches all six stems at once (about as long).
+- **Key, tempo, chords and lyrics** come from the chord finder (`splitter/analysis.py`).
+  *Find key, tempo & chords* hands the song to the chord finder's library (same id, no
+  second download) with its separation already done from these stems, so it only
+  finds the beats, bars, key and chords (tens of seconds). A song the chord finder
+  already has is linked straight away. The readout follows the controls: two
+  semitones up turns "F minor" into "G minor", 80% turns 136 BPM into 109. *Chords &
+  lyrics* shows the chord finder's sheet with the chords renamed in the key you hear
+  (`sheet.js`, the chord finder page's own drawing code); click a chord or a word to
+  play from there. *Add lyrics* runs the transcription (local Whisper) and nothing
+  else. Under `make ui` there's a link to the song in the chord finder.
+- **Metronome:** *Click* plays on the beats the chord finder found (so it follows a
+  song that speeds up or drifts), accented on each bar's first beat (meter changes
+  included), at any speed. *Count-in* plays one bar first, when you press play and
+  each time an A–B loop starts over. A song in free time (no steady beat found) has no
+  tempo or metronome.
+- **Record:** *● Record* (or `R`) starts playback (after the count-in, if it's on) and
+  records your microphone, with the browser's echo cancellation, noise suppression
+  and automatic gain off; *■ Stop* saves it as *Take 1*, *Take 2*… under the channels.
+  The page measures how late the microphone hears you against what you heard (the
+  audio output's delay) and the server takes that off (`splitter/takes.py`). If a take
+  still sits early or late, *−* / *+* move it 10 ms. You can record at any speed and key:
+  the server takes the recording back to the song's own tempo and key with Rubber Band,
+  so it plays along at every other setting too, like a stem. Takes have their own
+  fader, mute, solo and ⤓, are in *This mix* and *All stems*, and *✕* (twice) deletes
+  one. They're kept in the song's `takes/` folder, never with the stems (the mixer
+  doesn't see them). The microphone needs the page on `localhost`/`127.0.0.1`, which is
+  what `make ui` and `split-ui` give you.
+- **Effects:** *FX* on a channel opens its knobs: *Bass* / *Treble* (±12 dB shelves
+  at 120 Hz / 6 kHz), *Drive* (saturation, warm to fuzzy), *Chorus*, and *Reverb* /
+  *Echo* (how much of the channel goes to the shared room and echo, set under
+  *Room* and *Echo*). They're the mixer's own effects (`mixpipe/fx.py`), rendered on
+  the server for the channels that use them (a few seconds per channel for a whole
+  song, cached), so what you hear is what you download: *This mix*, a channel's ⤓
+  and *All stems* all include them. A channel's fader, mute and solo apply to its
+  reverb and echo too. The effects follow speed and key changes (they're made again
+  from the version you're hearing), and a note-value echo needs the song's tempo.
 - **Keys:** `Space` play/pause, `←` / `→` jump 5 s, `[` / `]` set A / B,
-  `L` toggle the loop, `-` / `+` speed ±10%, `,` / `.` key ♭ / ♯.
+  `L` toggle the loop, `-` / `+` speed ±10%, `,` / `.` key ♭ / ♯, `M` metronome, `R` record.
 
 Your mixer settings (volumes, speed, key, loop) are remembered per song in this
 browser.

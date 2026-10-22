@@ -22,8 +22,9 @@ from typing import Callable
 
 from .analysis import BANDS, compare_balance
 from .config import DEFAULT_CONFIG, treatment_for
+from .fx import SYNC, tone_bands
 from .io_utils import Stem
-from .plan import SEND_OFF_DB, validate_plan
+from .plan import SEND_OFF_DB, validate_plan, validate_send_buses
 
 SYSTEM_PROMPT = """\
 You are a mixing engineer. You will receive JSON measurements for each stem of a \
@@ -233,7 +234,7 @@ def rules_advisor(
             "glue_comp": cfg["master"]["glue_comp"],
         },
     }
-    note_log["master"](plan["master"])
+    note_log["finish"](plan, cfg)
     return guard_silent(validate_plan(plan, stems, cfg), analysis)
 
 
@@ -272,28 +273,188 @@ def _has(text: str, phrase: str) -> bool:
     return re.search(r"(?<![a-z])" + re.escape(phrase) + r"(?![a-z])", text) is not None
 
 
-def _apply_notes(plan_stems: dict, stems: list[Stem], notes: str) -> dict:
+_DRIVE_WORDS = ("gritty", "grit", "dirty", "distorted", "distortion", "crunch", "crunchy",
+                "overdrive", "overdriven", "saturate", "saturated", "saturation", "fuzz", "fuzzy")
+_CHORUS_WORDS = ("chorus", "shimmer", "shimmery", "lush", "doubled")
+_TONE = re.compile(r"\b(more|less|cut the|boost the|cut|boost)\s+(bass|low end|lows|treble|highs|top end|top)\b")
+_BIG_ROOM = ("bigger room", "bigger space", "larger room", "bigger reverb", "hall", "cathedral")
+_SMALL_ROOM = ("smaller room", "smaller space", "tighter room", "smaller reverb")
+_NOTE_SYNC = re.compile(r"\b(dotted\s+|triplet\s+)?(1/4|1/8|1/16|quarter|eighth|sixteenth)(?:[- ]note)?"
+                        r"(\s+dotted|\s+triplet)?\s+(?:echo|delay)")
+
+
+def _effect_notes(clause: str, targets: list[str], plan_stems: dict, bus_edits: list,
+                  tone: bool = False) -> str | None:
+    """Drive, chorus, bass/treble, room size and echo words in one clause.
+    Stem effects change `plan_stems` now; reverb/echo bus changes go to
+    `bus_edits` for the finish step. `tone`: the clause's "more bass" / "less
+    treble" is about the named stems' sound (not the bass stem's level).
+    Returns what was done, or None."""
+    small = any(_has(clause, w) for w in _NOTE_SMALL)
+    big = any(_has(clause, w) for w in _NOTE_BIG + ("much", "lot"))
+    scale = 0.5 if small else 2.0 if big else 1.0
+    less = (any(_has(clause, w) for w in ("less", "cleaner", "clean", "no", "remove", "without", "too"))
+            and not _has(clause, "too clean"))
+    done = []
+    if targets and any(_has(clause, w) for w in _DRIVE_WORDS + ("cleaner", "clean")):
+        for n in targets:
+            d = plan_stems[n].setdefault("drive", {})
+            d["amount"] = round(max(0.0, min(1.0, d.get("amount", 0.0) + (-0.25 if less else 0.25) * scale)), 2)
+        done.append(f"drive {'down' if less else 'up'} on {', '.join(targets)}")
+    if targets and any(_has(clause, w) for w in _CHORUS_WORDS):
+        for n in targets:
+            c = plan_stems[n].setdefault("chorus", {})
+            c["mix"] = round(max(0.0, min(1.0, c.get("mix", 0.0) + (-0.35 if less else 0.35) * scale)), 2)
+        done.append(f"chorus {'down' if less else 'up'} on {', '.join(targets)}")
+    m = _TONE.search(clause)
+    if tone and targets and m:
+        db = (-3.0 if m.group(1) in ("less", "cut", "cut the") else 3.0) * scale
+        low = m.group(2) in ("bass", "low end", "lows")
+        for n in targets:
+            plan_stems[n]["eq"] = (list(plan_stems[n].get("eq", []))
+                                   + tone_bands(db if low else 0.0, 0.0 if low else db))[-6:]
+        done.append(f"{'bass' if low else 'treble'} {db:+.1f} dB on {', '.join(targets)}")
+    if any(_has(clause, w) for w in _BIG_ROOM + _SMALL_ROOM):
+        sign = -1.0 if any(_has(clause, w) for w in _SMALL_ROOM) else 1.0
+        bus_edits.append(("reverb", "room_size", sign * 0.2 * scale))
+        bus_edits.append(("reverb", "decay_s", sign * 0.5 * scale))
+        done.append(f"{'smaller' if sign < 0 else 'bigger'} room")
+    sync = _NOTE_SYNC.search(clause)
+    if sync:
+        value = {"quarter": "1/4", "eighth": "1/8", "sixteenth": "1/16"}.get(sync.group(2), sync.group(2))
+        value += {"dotted": "d", "triplet": "t"}.get((sync.group(1) or sync.group(3) or "").strip(), "")
+        if value in SYNC:
+            bus_edits.append(("delay", "sync", value))
+            for n in targets:                    # echo needs a send to the delay bus
+                sends = plan_stems[n].setdefault("sends", {})
+                if sends.get("delay_db", SEND_OFF_DB) <= SEND_OFF_DB:
+                    sends["delay_db"] = -18.0
+            done.append(f"{value} note echo" + (f" on {', '.join(targets)}" if targets else ""))
+    elif any(_has(clause, w) for w in ("longer echo", "longer delay", "shorter echo", "shorter delay")):
+        sign = -1.0 if _has(clause, "shorter echo") or _has(clause, "shorter delay") else 1.0
+        bus_edits.append(("delay", "delay_ms", sign * 100.0 * scale))
+        done.append(f"{'shorter' if sign < 0 else 'longer'} echo")
+    if any(_has(clause, w) for w in ("more repeats", "fewer repeats", "less repeats", "more feedback",
+                                      "less feedback")):
+        sign = 1.0 if _has(clause, "more repeats") or _has(clause, "more feedback") else -1.0
+        bus_edits.append(("delay", "feedback", sign * 0.15 * scale))
+        done.append(f"{'more' if sign > 0 else 'fewer'} echo repeats")
+    return "; ".join(done) or None
+
+
+_TEMPO_WORDS = ("slower", "faster", "slow down", "slow it down", "speed up", "speed it up",
+                "tempo", "bpm", "half time", "half speed", "double time", "double speed",
+                "original speed", "normal speed")
+_KEY_WORDS = ("semitone", "semitones", "half step", "half-step", "whole step", "whole tone",
+              "fret", "frets", "key", "transpose", "pitch")
+_KEY_UP = ("up", "higher", "raise", "sharp")
+_KEY_DOWN = ("down", "lower", "drop", "flat")
+
+
+def _tempo_key(clause: str, tempo_bpm: float | None) -> tuple[str, str, float] | None:
+    """A clause about the song's tempo or key, as (what, how, amount):
+    ("speed", "set" | "add", percent) or ("key", "set" | "add", semitones).
+    None when the clause is about something else; ("speed", "bpm", n) for a BPM
+    target the song's tempo isn't known for."""
+    percent = re.search(r"\d\s*(?:%|percent)", clause) is not None
+    if any(_has(clause, w) for w in _TEMPO_WORDS) or percent and any(
+            _has(clause, w) for w in ("play", "speed", "tempo")):
+        if any(_has(clause, w) for w in ("original speed", "original tempo", "normal speed",
+                                          "normal tempo", "back to 100")):
+            return "speed", "set", 100.0
+        if _has(clause, "half time") or _has(clause, "half speed"):
+            return "speed", "set", 50.0
+        if _has(clause, "double time") or _has(clause, "double speed"):
+            return "speed", "set", 200.0
+        m = re.search(r"(\d{2,3}(?:\.\d+)?)\s*bpm", clause)
+        if m:
+            target = float(m.group(1))
+            return ("speed", "set", target / tempo_bpm * 100.0) if tempo_bpm else ("speed", "bpm", target)
+        m = re.search(r"(\d{1,3})\s*(?:%|percent)", clause)
+        slower = any(_has(clause, w) for w in ("slower", "slow down", "slow it down"))
+        sign = -1.0 if slower else 1.0
+        if m and (slower or any(_has(clause, w) for w in ("faster", "speed up", "speed it up"))):
+            return "speed", "add", sign * float(m.group(1))
+        if m:
+            return "speed", "set", float(m.group(1))
+        step = 5.0 if any(_has(clause, w) for w in _NOTE_SMALL) else \
+            20.0 if any(_has(clause, w) for w in _NOTE_BIG + ("much", "lot")) else 10.0
+        return "speed", "add", sign * step
+    if any(_has(clause, w) for w in _KEY_WORDS) or re.search(r"[+-]?\d{1,2}\s*st\b", clause):
+        if _has(clause, "original key"):
+            return "key", "set", 0.0
+        sign = -1.0 if any(_has(clause, w) for w in _KEY_DOWN) else 1.0
+        m = re.search(r"([+-]?\d{1,2})\s*(?:semitones?|half[- ]steps?|frets?|st\b)", clause)
+        if m:
+            n = float(m.group(1))
+            return "key", "add", n if m.group(1)[0] in "+-" else sign * n
+        if _has(clause, "whole step") or _has(clause, "whole tone") or _has(clause, "a tone") \
+                or _has(clause, "two frets"):
+            return "key", "add", sign * 2.0
+        if any(_has(clause, w) for w in _KEY_UP + _KEY_DOWN):
+            return "key", "add", sign
+    return None
+
+
+def _named_stems(text: str, plan_stems: dict, stems: list[Stem]) -> list[str]:
+    """The stems a clause names: by their own name, or by an instrument word."""
+    targets: list[str] = []
+    rest = text
+    for name in sorted(plan_stems, key=len, reverse=True):
+        if name.lower() in rest:
+            targets.append(name)
+            rest = rest.replace(name.lower(), " ")
+    for role, words in _NOTE_ROLES.items():
+        for w in sorted(words, key=len, reverse=True):
+            if _has(rest, w):
+                targets += [n for n, st in plan_stems.items()
+                            if st.get("role", None) == role or _stem_role(stems, n) == role]
+                rest = re.sub(r"(?<![a-z])" + re.escape(w) + r"(?![a-z])", " ", rest)
+                break
+    return list(dict.fromkeys(targets))
+
+
+def _apply_notes(plan_stems: dict, stems: list[Stem], notes: str,
+                 tempo_bpm: float | None = None) -> dict:
     """Act on plain-English notes with keyword rules.
 
     Handles, clause by clause: a stem or instrument ("vocals", "the harmonica",
     a stem's own name) with a direction ("louder", "too quiet", "less", "up",
-    "can't hear" ...) moves its fader by 3 dB (1.5 for "a little", 6 for "way too"); "more/less reverb|space|echo|wet|dry"
+    "can't hear" ...) moves its fader by 3 dB (1.5 for "a little", 6 for "way too");
+    tempo and key ("a little slower", "at 90 bpm", "up a semitone") are read
+    first, so "speed up the drums" changes the tempo, not the drums; "more/less reverb|space|echo|wet|dry"
     moves its sends (or all sends when no instrument is named); and mood words for
     the whole mix: bright/harsh/sizzly, dull/dark/muffled, muddy/boomy, thin, loud,
-    quiet. Anything not understood is listed in the plan notes instead of being
-    silently dropped. Returns {"applied": [...], "ignored": [...],
-    "master": callable that edits the plan's master section}.
+    quiet; and effects (fx.py): drive ("gritty guitar"), chorus, bass/treble on
+    a stem ("more bass on the guitar"), the room ("bigger room") and the echo
+    ("1/8 note echo on the vocals", "more repeats"). Anything not understood is
+    listed in the plan notes instead of being silently dropped. Returns
+    {"applied": [...], "ignored": [...], "finish": callable(plan, cfg) that
+    makes the master and send-bus changes}.
     """
-    log = {"applied": [], "ignored": [], "master": lambda master: None}
+    log = {"applied": [], "ignored": [], "finish": lambda plan, cfg=None: None}
     if not notes.strip():
         return log
 
     master_eq: list[dict] = []
     master_target = [0.0]
+    tempo_key: list[tuple[str, str, float]] = []
+    bus_edits: list[tuple[str, str, object]] = []
 
     for raw in re.split(r"[.;,!?\n]|\bbut\b|\band\b", notes.lower()):
         clause = raw.strip()
         if not clause:
+            continue
+        tk = _tempo_key(clause, tempo_bpm)
+        if tk and tk[1] == "bpm":
+            log["ignored"].append(f"{clause} (the song's tempo isn't known, so say it in %)")
+            continue
+        if tk:
+            tempo_key.append(tk)
+            what, how, amount = tk
+            unit = "%" if what == "speed" else " st"
+            change = f"by {amount:+.0f}{unit}" if how == "add" else f"to {amount:.0f}{unit}"
+            log["applied"].append(f"'{clause}' -> {what} {change}")
             continue
         direction = 0
         if any(_has(clause, p) for p in _NOTE_DOWN) and not any(
@@ -304,21 +465,15 @@ def _apply_notes(plan_stems: dict, stems: list[Stem], notes: str) -> dict:
                 _has(clause, p) for p in ("can't hear", "cannot hear", "too quiet", "buried")
             ) else direction
 
-        # which stems does the clause name?
-        targets: list[str] = []
-        rest = clause
-        for name in sorted(plan_stems, key=len, reverse=True):
-            if name.lower() in rest:
-                targets.append(name)
-                rest = rest.replace(name.lower(), " ")
-        for role, words in _NOTE_ROLES.items():
-            for w in sorted(words, key=len, reverse=True):
-                if _has(rest, w):
-                    targets += [n for n, st in plan_stems.items()
-                                if st.get("role", None) == role or _stem_role(stems, n) == role]
-                    rest = re.sub(r"(?<![a-z])" + re.escape(w) + r"(?![a-z])", " ", rest)
-                    break
-        targets = list(dict.fromkeys(targets))
+        # which stems does the clause name? "more bass on the guitar" is about the
+        # guitar's low end, but "more bass" on its own is still the bass stem
+        tone_of = _named_stems(_TONE.sub(" ", clause), plan_stems, stems) if _TONE.search(clause) else []
+        targets = tone_of or _named_stems(clause, plan_stems, stems)
+
+        effects = _effect_notes(clause, targets, plan_stems, bus_edits, tone=bool(tone_of))
+        if effects:
+            log["applied"].append(f"'{clause}' -> {effects}")
+            continue
 
         tone = None
         if any(_has(clause, w) for w in ("bright", "harsh", "sizzly", "sibilant", "piercing", "shrill")):
@@ -380,13 +535,29 @@ def _apply_notes(plan_stems: dict, stems: list[Stem], notes: str) -> dict:
         if not done:
             log["ignored"].append(clause)
 
-    def edit_master(master: dict) -> None:
+    def finish(plan: dict, cfg: dict | None = None) -> None:
+        master = plan.setdefault("master", {})
+        if bus_edits:
+            buses = plan["send_buses"] = validate_send_buses(plan.get("send_buses"), cfg or DEFAULT_CONFIG)
+            for bus, key, change in bus_edits:
+                if key == "sync":
+                    buses[bus]["sync"] = change
+                else:
+                    buses[bus][key] = buses[bus].get(key, 0.0) + change
+                    if key == "delay_ms":             # a set time replaces a note value
+                        buses[bus]["sync"] = ""
         if master_eq:
             master["master_eq"] = list(master.get("master_eq", [])) + master_eq
         if master_target[0]:
             master["target_lufs"] = master.get("target_lufs", -14.0) + master_target[0]
+        for what, how, amount in tempo_key:
+            if what == "speed":
+                pct = amount if how == "set" else float(master.get("speed", 1.0)) * 100 + amount
+                master["speed"] = pct / 100.0
+            else:
+                master["semitones"] = amount if how == "set" else master.get("semitones", 0) + amount
 
-    log["master"] = edit_master
+    log["finish"] = finish
     return log
 
 
@@ -760,15 +931,29 @@ Stem params (target = a stem name, role:vocal etc., or all):
   eq_add (value {"freq", "gain_db", "q", "type": peaking|low_shelf|high_shelf}), eq_clear (value true),
   comp_ratio (delta or value), comp_threshold_db (delta or value),
   deess_db (value 0..10: de-esser depth), reverb_db / delay_db (delta, dB; send level, -60 = off),
-  transient_attack / transient_sustain (delta or value, -1..+1)
+  transient_attack / transient_sustain (delta or value, -1..+1),
+  drive (delta or value 0..1: saturation; 0 clean, 0.2 warm, 0.6+ distorted),
+  chorus (delta or value 0..1: chorus amount, 0 = off),
+  bass_db / treble_db (delta, dB: a low shelf at 120 Hz / a high shelf at 6 kHz on that stem)
 Master params (target = master):
   target_lufs (delta or value), ceiling_db (value), eq_add, eq_clear, glue_ratio (delta or value),
-  reverb_return_db / delay_return_db (delta), reverb_decay_s (delta or value, seconds)
+  reverb_return_db / delay_return_db (delta), reverb_decay_s (delta or value, seconds),
+  reverb_size (delta or value 0..1: the room's size), reverb_pre_delay_ms (delta or value),
+  delay_ms (delta or value: echo time; frees it from the tempo), delay_sync (value \
+"1/4" | "1/4d" | "1/4t" | "1/8" | "1/8d" | "1/8t" | "1/16", or "" for a free time: echo locked \
+to the tempo), delay_feedback (delta or value 0..0.9: how many repeats). An echo is only \
+heard on stems that send to it (delay_db).
+  speed_pct (delta or value: the whole song's tempo in percent of the recording, 100 = as \
+recorded, 90 = 10% slower; the key stays), semitones (delta or value: whole semitones the \
+whole song moves, +2 = a whole step up; the tempo stays)
 
 Rules:
 - Change only what the message asks for. Do not "improve" anything else.
 - Relative words map to modest steps: "a little" 1.5 dB, plain "too loud" 3 dB, "way too" 6 dB.
 - "Too loud" for a stem is a gain cut on that stem, not a master change.
+- Tempo: "a little slower/faster" 5%, plain 10%, "much" 20%. For "at N BPM" use \
+speed_pct = N / tempo.bpm_as_recorded * 100 (when it is known). Key: "a semitone" / \
+"half step" 1, "whole step" / "a tone" 2.
 - Prefer one clear move over several small ones. Tone words: bright/harsh -> cut 3-8 kHz, \
 muddy -> cut 200-400 Hz, thin -> boost 100-200 Hz, boxy -> cut 400-800 Hz.
 - If the message names something that is not in the session, or is only a question, \
@@ -780,16 +965,20 @@ return no adjustments and say so in the reply.
 _STEM_PARAMS = {
     "gain_db", "pan", "mute", "hpf_hz", "lpf_hz", "eq_add", "eq_clear", "comp_ratio",
     "comp_threshold_db", "deess_db", "reverb_db", "delay_db", "transient_attack",
-    "transient_sustain",
+    "transient_sustain", "drive", "chorus", "bass_db", "treble_db",
 }
 _MASTER_PARAMS = {
     "target_lufs", "ceiling_db", "eq_add", "eq_clear", "glue_ratio", "reverb_return_db",
-    "delay_return_db", "reverb_decay_s",
+    "delay_return_db", "reverb_decay_s", "speed_pct", "semitones", "reverb_size",
+    "reverb_pre_delay_ms", "delay_ms", "delay_sync", "delay_feedback",
 }
 _MAX_STEP = {"gain_db": 12.0, "pan": 2.0, "comp_ratio": 6.0, "comp_threshold_db": 18.0,
              "deess_db": 10.0, "reverb_db": 24.0, "delay_db": 24.0, "transient_attack": 2.0,
              "transient_sustain": 2.0, "target_lufs": 6.0, "glue_ratio": 3.0,
-             "reverb_return_db": 18.0, "delay_return_db": 18.0, "reverb_decay_s": 4.0}
+             "reverb_return_db": 18.0, "delay_return_db": 18.0, "reverb_decay_s": 4.0,
+             "speed_pct": 50.0, "semitones": 12.0, "drive": 1.0, "chorus": 1.0, "bass_db": 12.0,
+             "treble_db": 12.0, "reverb_size": 1.0, "reverb_pre_delay_ms": 100.0, "delay_ms": 500.0,
+             "delay_feedback": 0.9}
 
 
 def _resolve_targets(target: str, plan: dict) -> list[str] | None:
@@ -884,6 +1073,17 @@ def _apply_stem(st: dict, param: str, adj: dict) -> bool:
     if param == "eq_clear":
         st["eq"] = []
         return True
+    if param in ("bass_db", "treble_db"):     # one shelf band (fx.tone_bands), like eq_add
+        try:
+            db = float(adj["delta"] if "delta" in adj else adj.get("value"))
+        except (TypeError, ValueError, KeyError):
+            return False
+        db = max(-_MAX_STEP[param], min(_MAX_STEP[param], db))
+        bands = tone_bands(db, 0.0) if param == "bass_db" else tone_bands(0.0, db)
+        if not bands:
+            return False
+        st["eq"] = (list(st.get("eq", [])) + bands)[-6:]
+        return True
     slot = {"gain_db": (st, "fader_db"), "pan": (st, "pan"), "hpf_hz": (st, "hpf_hz"),
             "lpf_hz": (st, "lpf_hz"),
             "comp_ratio": (st.setdefault("comp", {}), "ratio"),
@@ -892,7 +1092,9 @@ def _apply_stem(st: dict, param: str, adj: dict) -> bool:
             "reverb_db": (st.setdefault("sends", {}), "reverb_db"),
             "delay_db": (st.setdefault("sends", {}), "delay_db"),
             "transient_attack": (st.setdefault("transient", {}), "attack"),
-            "transient_sustain": (st.setdefault("transient", {}), "sustain")}[param]
+            "transient_sustain": (st.setdefault("transient", {}), "sustain"),
+            "drive": (st.setdefault("drive", {}), "amount"),
+            "chorus": (st.setdefault("chorus", {}), "mix")}[param]
     holder, key = slot
     current = float(holder.get(key, SEND_OFF_DB if param in ("reverb_db", "delay_db") else 0.0))
     if param in ("reverb_db", "delay_db") and current <= SEND_OFF_DB and "delta" in adj:
@@ -919,12 +1121,31 @@ def _apply_master(plan: dict, param: str, adj: dict) -> bool:
     if param == "eq_clear":
         m["master_eq"] = []
         return True
+    if param == "speed_pct":              # said in percent, kept as a ratio
+        pct = _num(adj, float(m.get("speed", 1.0)) * 100.0, param)
+        if pct is None:
+            return False
+        m["speed"] = pct / 100.0
+        return True
     buses = plan.setdefault("send_buses", {})
+    if param == "delay_sync":
+        value = str(adj.get("value") or "")
+        if value and value not in SYNC:
+            return False
+        buses.setdefault("delay", {})["sync"] = value
+        return True
+    if param == "delay_ms":                   # a set echo time replaces a note value
+        buses.setdefault("delay", {})["sync"] = ""
     slot = {"target_lufs": (m, "target_lufs"), "ceiling_db": (m, "ceiling_db"),
             "glue_ratio": (m.setdefault("glue_comp", {}), "ratio"),
             "reverb_return_db": (buses.setdefault("reverb", {}), "return_db"),
             "delay_return_db": (buses.setdefault("delay", {}), "return_db"),
-            "reverb_decay_s": (buses.setdefault("reverb", {}), "decay_s")}[param]
+            "reverb_decay_s": (buses.setdefault("reverb", {}), "decay_s"),
+            "semitones": (m, "semitones"),
+            "reverb_size": (buses.setdefault("reverb", {}), "room_size"),
+            "reverb_pre_delay_ms": (buses.setdefault("reverb", {}), "pre_delay_ms"),
+            "delay_ms": (buses.setdefault("delay", {}), "delay_ms"),
+            "delay_feedback": (buses.setdefault("delay", {}), "feedback")}[param]
     holder, key = slot
     value = _num(adj, float(holder.get(key, 0.0)), param)
     if value is None:
@@ -979,10 +1200,14 @@ def diff_plans(old: dict, new: dict) -> list[dict]:
                                       ("deess", "max_reduction_db", "de-ess", " dB"),
                                       ("sends", "reverb_db", "reverb send", " dB"),
                                       ("sends", "delay_db", "delay send", " dB"),
-                                      ("transient", "attack", "attack", ""), ("transient", "sustain", "sustain", "")):
+                                      ("transient", "attack", "attack", ""), ("transient", "sustain", "sustain", ""),
+                                      ("drive", "amount", "drive", ""), ("chorus", "mix", "chorus", "")):
             va, vb = a.get(grp, {}).get(key), b.get(grp, {}).get(key)
+            if grp in ("drive", "chorus"):      # older plans have no effects: that's 0, off
+                va, vb = va or 0.0, vb or 0.0
             if va is not None and vb is not None and abs(va - vb) > 1e-6:
                 fmt = (lambda v: "off" if v <= SEND_OFF_DB else f"{v:.0f}{unit}") if grp == "sends" else \
+                      (lambda v: "off" if v <= 1e-3 else f"{v:.2f}") if grp in ("drive", "chorus") else \
                       (lambda v: f"{v:.1f}{unit}")
                 add(name, f"{grp}.{key}", f"{name} {label} {fmt(va)} -> {fmt(vb)}")
 
@@ -996,17 +1221,43 @@ def diff_plans(old: dict, new: dict) -> list[dict]:
             add("master", "eq", "master EQ cleared")
         for x in added:
             add("master", "eq", f"master EQ {_fmt_eq(x)}")
+    sa, sb = ma.get("speed", 1.0), mb.get("speed", 1.0)
+    if abs(sa - sb) > 1e-6:
+        add("master", "speed", f"speed {sa * 100:.0f}% -> {sb * 100:.0f}%")
+    ka, kb = int(ma.get("semitones", 0)), int(mb.get("semitones", 0))
+    if ka != kb:
+        add("master", "semitones", f"key {ka:+d} -> {kb:+d} st")
     ga, gb = ma.get("glue_comp", {}).get("ratio"), mb.get("glue_comp", {}).get("ratio")
     if ga is not None and gb is not None and abs(ga - gb) > 1e-6:
         add("master", "glue", f"master glue {ga:.1f}:1 -> {gb:.1f}:1")
     for bus, key, label, unit in (("reverb", "return_db", "reverb return", " dB"),
                                   ("delay", "return_db", "delay return", " dB"),
-                                  ("reverb", "decay_s", "reverb decay", " s")):
+                                  ("reverb", "decay_s", "reverb decay", " s"),
+                                  ("reverb", "room_size", "reverb size", ""),
+                                  ("reverb", "pre_delay_ms", "reverb pre-delay", " ms"),
+                                  ("delay", "delay_ms", "echo time", " ms"),
+                                  ("delay", "feedback", "echo repeats", "")):
         va = old.get("send_buses", {}).get(bus, {}).get(key)
         vb = new.get("send_buses", {}).get(bus, {}).get(key)
         if va is not None and vb is not None and abs(va - vb) > 1e-6:
-            add("master", f"{bus}.{key}", f"{label} {va:.1f} -> {vb:.1f}{unit}")
+            fmt = (lambda v: f"{v:.0f}{unit}") if unit == " ms" else (lambda v: f"{v:.2f}") if not unit \
+                else (lambda v: f"{v:.1f}{unit}")
+            add("master", f"{bus}.{key}", f"{label} {fmt(va)} -> {fmt(vb)}")
+    sa = old.get("send_buses", {}).get("delay", {}).get("sync") or ""
+    sb = new.get("send_buses", {}).get("delay", {}).get("sync") or ""
+    if sa != sb:
+        add("master", "delay.sync", f"echo time {sa or 'free'} -> {sb + ' note' if sb else 'free'}")
     return chips
+
+
+def _tempo_facts(plan: dict, tempo_bpm: float | None) -> dict:
+    """What the model needs for "slower", "at 90 BPM" or "up a tone"."""
+    m = plan.get("master", {})
+    speed = float(m.get("speed", 1.0))
+    bpm = round(float(tempo_bpm), 1) if tempo_bpm else None
+    return {"bpm_as_recorded": bpm, "speed_pct": round(speed * 100, 1),
+            "bpm_now": round(bpm * speed, 1) if bpm else None,
+            "semitones": int(m.get("semitones", 0))}
 
 
 def _plan_for_chat(plan: dict) -> dict:
@@ -1031,6 +1282,7 @@ def revise_plan(
     provider: str | None = None,
     model: str | None = None,
     llm: Callable[[str, str], str] | None = None,
+    tempo_bpm: float | None = None,
 ) -> dict:
     """One chat turn: the musician's message in, a revised plan out.
 
@@ -1039,7 +1291,8 @@ def revise_plan(
     adjustments (`REVISE_PROMPT`); `apply_adjustments` applies and clamps them.
     On any failure (no key, network, malformed JSON) or with `use_llm=False`,
     the keyword parser `_apply_notes` handles the message instead.
-    `llm(system, payload) -> text` can be injected (tests).
+    `llm(system, payload) -> text` can be injected (tests). `tempo_bpm` is the
+    song's measured tempo as recorded, so "at 90 BPM" can be turned into a speed.
 
     Returns {"plan", "reply", "changes": diff chips, "source", "rejected",
     "not_understood"}. "changes" is computed from the two plans, so it is
@@ -1063,6 +1316,7 @@ def revise_plan(
             "output": output_analysis,
             "level_in_mix_db": stem_levels,
             "stem_analysis": stem_analysis,
+            "tempo": _tempo_facts(plan, tempo_bpm),
         }, default=str)
         try:
             parsed = None
@@ -1088,8 +1342,8 @@ def revise_plan(
             result["llm_error"] = f"{type(exc).__name__}: {exc}"[:300]
 
     new = copy.deepcopy(plan)
-    log = _apply_notes(new["stems"], stems, message)
-    log["master"](new["master"])
+    log = _apply_notes(new["stems"], stems, message, tempo_bpm=tempo_bpm)
+    log["finish"](new, cfg)
     new = validate_plan(new, stems, cfg)
     new["source"] = "chat:rules"
     result.update(plan=new, source="chat:rules", not_understood=log["ignored"])

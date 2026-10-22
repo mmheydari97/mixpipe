@@ -27,6 +27,17 @@ NO_CACHE = {"Cache-Control": "no-cache"}
 _ID = re.compile(r"^[\w-]+$", re.UNICODE)
 
 
+def attachment(filename: str) -> dict:
+    """Headers that make the browser save a download as `filename`. The real
+    name goes in filename* (RFC 5987): headers are latin-1, so a song title in
+    Persian would otherwise fail; the plain filename= is an ASCII stand-in."""
+    from urllib.parse import quote
+
+    fallback = re.sub(r"[^A-Za-z0-9._-]+", "_", filename)
+    return {"Content-Disposition":
+            f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename)}"}
+
+
 def as_bool(value, default: bool) -> bool:
     """Form fields arrive as "true"/"false" strings, JSON as booleans."""
     if value is None or value == "":
@@ -260,18 +271,28 @@ class _RevalidatedStatic(StaticFiles):
         return response
 
 
+def page_html(page: str) -> HTMLResponse:
+    """static/<page>, with /static/x.js -> /static/x.js?v=<mtime>: an edited file
+    gets a new URL, so even a copy the browser already cached can't be reused by
+    mistake."""
+    def versioned(m: re.Match) -> str:
+        f = STATIC / m.group(1)
+        return f'/static/{m.group(1)}?v={int(f.stat().st_mtime)}"' if f.is_file() else m.group(0)
+
+    html = re.sub(r'/static/([\w.-]+\.(?:js|css))"', versioned, (STATIC / page).read_text())
+    return HTMLResponse(html, headers=NO_CACHE)
+
+
+def mount_static(app: FastAPI) -> None:
+    """The shared static folder at /static."""
+    app.mount("/static", _RevalidatedStatic(directory=STATIC), name="static")
+
+
 def add_page(app: FastAPI, page: str) -> None:
     """Serve static/<page> at / and the shared static folder at /static."""
 
     @app.get("/")
     def index():
-        # /static/x.js -> /static/x.js?v=<mtime>: an edited file gets a new URL,
-        # so even a copy the browser already cached can't be reused by mistake
-        def versioned(m: re.Match) -> str:
-            f = STATIC / m.group(1)
-            return f'/static/{m.group(1)}?v={int(f.stat().st_mtime)}"' if f.is_file() else m.group(0)
+        return page_html(page)
 
-        html = re.sub(r'/static/([\w.-]+\.(?:js|css))"', versioned, (STATIC / page).read_text())
-        return HTMLResponse(html, headers=NO_CACHE)
-
-    app.mount("/static", _RevalidatedStatic(directory=STATIC), name="static")
+    mount_static(app)

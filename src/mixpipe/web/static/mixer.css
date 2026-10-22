@@ -45,17 +45,33 @@ input[type=range] { accent-color: var(--accent); }
 #ab-b-select { min-width: 0; padding: 6px 8px; }
 #seek { width: 100%; }
 .time { display: flex; justify-content: space-between; font-family: var(--mono); font-size: .8em; color: var(--muted); }
-.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
 @media (max-width: 520px) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .stat { background: var(--bg); border-radius: 8px; padding: 8px 10px; display: grid; }
 .stat span { font-size: .75em; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
 .stat strong { font-family: var(--mono); font-size: .95em; font-weight: 600; }
 
-/* ---------- model ---------- */
-.model-btn { font-size: .85em; padding: 3px 10px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.model-panel { display: grid; gap: 10px; margin-bottom: 12px; padding: 12px;
+/* ---------- chat settings (gear) ---------- */
+.engine-btn { display: inline-flex; align-items: center; gap: 6px; font-size: .85em; padding: 4px 10px;
+  max-width: 100%; overflow: hidden; white-space: nowrap; }
+.engine-btn span { overflow: hidden; text-overflow: ellipsis; }
+.engine-btn .gear { flex: none; transition: transform .3s; }
+.engine-btn[aria-expanded=true] .gear { transform: rotate(60deg); }
+@media (prefers-reduced-motion: reduce) { .engine-btn .gear { transition: none; } }
+.engine-btn.ai { border-color: var(--accent); }
+.engine-panel { display: grid; gap: 12px; margin-bottom: 12px; padding: 12px;
   background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); }
-.model-panel p { margin: 0; }
+.engine-panel p { margin: 0; }
+.engine-choice { display: grid; gap: 8px; }
+.engine-opt { display: grid; grid-template-columns: auto 1fr; gap: 10px; padding: 10px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 8px; }
+.engine-opt:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.engine-opt:has(input:disabled) { opacity: .6; cursor: not-allowed; }
+.engine-opt input { margin-top: 3px; }
+.engine-opt > span { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.engine-opt small.muted { flex-basis: 100%; }
+#engine-mix-settings { display: grid; gap: 10px; }
+.btn-row.end { justify-content: flex-end; }
 
 /* ---------- chat ---------- */
 .chat-log { list-style: none; margin: 0; padding: 4px; display: flex; flex-direction: column; gap: 10px;
@@ -101,10 +117,11 @@ input[type=range] { accent-color: var(--accent); }
 .channels output { font-family: var(--mono); font-size: .8em; min-width: 4ch; text-align: right; color: var(--muted); }
 .channels tr.muted-row .stem-name { opacity: .45; text-decoration: line-through; }
 
-/* ---------- AI edit ---------- */
-.ai-edit > p { margin: 0 0 10px; }
-.ai-row { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
-.ai-row .field { margin-top: 0; }
-.ai-row input:not([type=range]) { width: 7em; font-family: var(--mono); }
-.ai-row .link { padding-bottom: 8px; }
-.badge.ai { background: var(--accent-soft); color: var(--text); }
+/* ---------- AI edit options (above the input when the chat is in AI edit) ---------- */
+.ai-options { display: grid; gap: 8px; margin: 8px 0; padding: 10px; border-radius: 8px; background: var(--accent-soft); }
+.seg { display: inline-flex; flex-wrap: wrap; gap: 4px 14px; }
+.seg label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.ai-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.ai-row label { display: inline-flex; align-items: center; gap: 6px; }
+.ai-row input:not([type=range]) { width: 6.5em; font-family: var(--mono); padding: 4px 6px; }
+.badge.ai { background: var(--accent-soft); color: var(--text); margin-right: 6px; }

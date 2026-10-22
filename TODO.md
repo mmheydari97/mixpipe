@@ -13,6 +13,27 @@ Shared code (`songstore.py`, `fetch.py`, `openrouter.py`, `web/common.py`) is li
 Every `# TODO` stub that used to be in the mixer has been implemented and tested.
 `grep -rn "TODO" src` finds none.
 
+## Tickets
+
+Requested 2026-10-21. Rule for all of them: one implementation per capability, shared by the
+apps that use it.
+
+- [x] **T1 One port for everything.** A home page that opens the chord finder, the splitter and the
+  mixer, all served from one port (`make ui`, or `make studio` with ACE-Step).
+- [x] **T2 Download the splitter's stems.** Each stem, or all of them as a zip, at the current speed,
+  key and effects.
+- [x] **T3 Tempo and key in the mixer chat.** "Make it 10% slower", "up 2 semitones", on the same
+  Rubber Band code the splitter uses (`stretch.py`, now shared).
+- [x] **T4 Effects in both apps.** Reverb & echo, bass/treble tone, drive, chorus: one module (`fx.py`)
+  that the mixer's chat and the splitter's knobs both drive.
+- [x] **TA Splitter ↔ chord finder link.** One chord-finder analysis of a split song (reusing its
+  stems, no second separation) feeds the next three tickets.
+- [x] **T8 Key & BPM readout** in the splitter, following the speed and key controls.
+- [x] **T5 Metronome & count-in** in the splitter, on the detected beats and bars.
+- [x] **T6 Chords & lyrics in sync** in the splitter, with the chord finder's sheet code shared.
+- [x] **T7 Record yourself** over the backing in the splitter; takes play back in sync and can be
+  downloaded or mixed in.
+
 ---
 
 ## Mixer
@@ -119,7 +140,20 @@ Nothing is stubbed any more. What is left are limits of what exists:
 
 ## Stem splitter
 
-Nothing tracked. Its limits are the separation model's (Demucs `htdemucs_6s`: acoustic
-guitar often lands in *Other*, keys is the weakest stem) and are described in
+The separation's limits are the model's (Demucs `htdemucs_6s`: acoustic guitar often
+lands in *Other*, keys is the weakest stem) and are described in
 [`src/mixpipe/splitter/README.md`](src/mixpipe/splitter/README.md#what-to-expect-from-the-separation).
-It shares the job queue (`--workers`, cancel) with the chord finder.
+It shares the job queue (`--workers`, cancel) with the chord finder. Limits of the
+practice features added on 2026-10-22:
+
+- **Effects aren't instant.** They're the mixer's own code, rendered on the server per
+  channel (about 3 s per channel for a whole song, then cached), so a knob change is
+  heard a moment later, like an *Accurate* speed change.
+- **The beat comes from the chord finder**, which tracks it on the harmonic stems
+  (bass + guitar + keys + other, no drums). A song it hears as free time (cardigan
+  did) gets no tempo, bar grid or metronome. Giving its beat tracker the drum stem
+  would likely help; that is a chord finder change.
+- **Recording latency** is estimated from the browser's output/base latency (and the
+  input's when the browser reports it); the −/+ nudge fixes what that misses. It was
+  checked with Chrome's fake microphone, not a real one, and in Chrome only.
+- **Takes have no effects** (no *FX* button); they're voices or instruments as recorded.

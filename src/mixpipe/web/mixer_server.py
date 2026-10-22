@@ -243,6 +243,7 @@ def create_app(
                 "versions": [s.summary(v) for v in s.versions],
                 "turns": s.turns,
                 "llm": {"provider": s.provider, "model": s.model} if s.use_llm else None,
+                "tempo_bpm": s.tempo_bpm,
                 "preview": {"start_s": s.start_s, "duration_s": s.duration_s,
                             "full_duration_s": round(s.full_duration, 2)} if s.preview else None,
             })

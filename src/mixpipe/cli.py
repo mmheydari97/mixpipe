@@ -12,6 +12,7 @@
     python -m mixpipe.cli chords-ui [--port 8765] [--workers N]
     python -m mixpipe.cli split   song.mp3 | https://...   (vocals / guitar / ... stems)
     python -m mixpipe.cli split-ui  [--port 8766]
+    python -m mixpipe.cli ui        [--port 8760]       (all three, with a home page)
 """
 
 from __future__ import annotations
@@ -397,6 +398,15 @@ def cmd_mix_ui(args) -> int:
                   "mixer", args.host, args.port, args.no_browser)
 
 
+def cmd_ui(args) -> int:
+    try:
+        from .web.hub import create_app
+    except ImportError as exc:
+        raise RuntimeError(f"{CHORDS_DEPS_HINT} ({exc})") from exc
+    return _serve(create_app(args.chords_out, args.splitter_out, args.mixer_out, workers=args.workers),
+                  "tools", args.host, args.port, args.no_browser)
+
+
 def cmd_fetch_model(args) -> int:
     try:
         from .chords import btc
@@ -473,6 +483,17 @@ def main(argv: list[str] | None = None) -> int:
     p_ct.add_argument("--model", default=None)
     p_ct.add_argument("--bit-depth", type=int, choices=[16, 24], default=24)
     p_ct.set_defaults(func=cmd_chat)
+
+    p_hub = sub.add_parser("ui", help="the chord finder, splitter and mixer on one port")
+    p_hub.add_argument("--host", default="127.0.0.1")
+    p_hub.add_argument("--port", type=int, default=8760)
+    p_hub.add_argument("--chords-out", default="out/chords", help="the chord finder's song store")
+    p_hub.add_argument("--splitter-out", default="out/splitter", help="the splitter's song store")
+    p_hub.add_argument("--mixer-out", default="out/mixer", help="mixer session directory")
+    p_hub.add_argument("--no-browser", action="store_true")
+    p_hub.add_argument("--workers", type=int, default=1,
+                       help="songs analysed or split at once, per tool (default 1)")
+    p_hub.set_defaults(func=cmd_ui)
 
     p_mu = sub.add_parser("mix-ui", help="start the mix-by-chat web UI")
     p_mu.add_argument("--host", default="127.0.0.1")

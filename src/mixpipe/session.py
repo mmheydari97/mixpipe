@@ -33,7 +33,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import acestep
+from . import acestep, stretch
 from .advisor import (apply_adjustments, diff_plans, llm_advisor, resolve_llm, revise_plan,
                       rules_advisor)
 from .analysis import analyze_all, analyze_master, integrated_lufs, masking_report
@@ -44,7 +44,7 @@ from .io_utils import Stem, load_stems, read_audio, stems_mono, to_sample_rate, 
 from .master import dither, master
 from .mixdown import mixdown
 from .plan import save_plan, validate_plan
-from .timing import align_stems
+from .timing import align_stems, estimate_tempo_bpm
 
 PREVIEW_S = 45.0          # slice length a long song is worked on in
 PREVIEW_OVER_S = 75.0     # songs longer than this get a preview slice
@@ -64,6 +64,34 @@ def llm_choice(cfg: dict, provider: str | None = None, model: str | None = None)
     if provider == "openrouter" and not os.environ.get("OPENROUTER_API_KEY"):
         return None
     return provider, model
+
+
+def _tempo_of(stems: list[Stem]) -> float | None:
+    """The song's tempo as recorded (BPM), from all the stems together."""
+    try:
+        n = max(s.n_samples for s in stems)
+        mono = np.zeros(n, dtype=np.float32)
+        for s in stems:
+            a = s.audio.mean(axis=1) if s.audio.ndim == 2 else s.audio
+            mono[: len(a)] += a
+        bpm = estimate_tempo_bpm(mono, stems[0].sr)
+        return round(float(bpm), 1) if bpm else None
+    except Exception:  # noqa: BLE001 - a tempo is a nicety, never a reason to fail
+        return None
+
+
+def _without_stretch(turn: dict, before: dict) -> str:
+    """Undo a tempo/key change in `turn` when Rubber Band can't make it; returns a note."""
+    m, was = turn["plan"]["master"], before["master"]
+    if (m.get("speed", 1.0), m.get("semitones", 0)) == (was.get("speed", 1.0), was.get("semitones", 0)):
+        return ""
+    try:
+        stretch.check_available(m.get("semitones", 0))
+        return ""
+    except stretch.StretchError as exc:
+        m["speed"], m["semitones"] = was.get("speed", 1.0), was.get("semitones", 0)
+        turn["changes"] = [c for c in turn["changes"] if c["param"] not in ("speed", "semitones")]
+        return f"(Tempo and key stay as they are: {exc}.) "
 
 
 def _clock(seconds: float) -> str:
@@ -146,7 +174,10 @@ class MixSession:
             self.stems = align_stems(self.stems)
         self.analysis = analyze_all(self.stems)
         self.masking = masking_report(self.stems)
+        self.tempo_bpm = _tempo_of(self.stems)
         self.cleaned: dict[str, Stem] = {}
+        # cleaned stems at the plan's speed/key, the latest one per length (preview, full)
+        self._stretched: dict[str, tuple[tuple[float, int], dict[str, Stem]]] = {}
         self.versions: list[dict] = []
         self.turns: list[dict] = []          # the conversation, including replies that changed nothing
         self.pos = -1
@@ -168,13 +199,36 @@ class MixSession:
                 cache[s.name] = clean_stem(s, self.cfg)
         return cache
 
+    def _at_speed(self, stems: list[Stem], cleaned: dict[str, Stem], speed: float,
+                  semitones: int) -> dict[str, Stem]:
+        """The cleaned stems at the plan's tempo and key (stretch.stretch_stems, as the
+        splitter does it), kept until the next change: a fader move at 90% doesn't
+        stretch again. Voices keep their formants when the key moves."""
+        slot = "preview" if stems is self.stems else "full"
+        hit = self._stretched.get(slot)
+        if hit and hit[0] == (speed, semitones):
+            return hit[1]
+        roles = {s.name: s.role or "" for s in stems}
+        sr = stems[0].sr
+        out = stretch.stretch_stems({s.name: cleaned[s.name].audio for s in stems}, sr, speed,
+                                    semitones, "fine", formant=lambda n: roles[n].startswith("vocal"),
+                                    keep_loudness=True)
+        at = {n: cleaned[n].copy_with(a) for n, a in out.items()}
+        self._stretched[slot] = ((speed, semitones), at)
+        return at
+
     def render(self, plan: dict, stems: list[Stem] | None = None,
                cache: dict[str, Stem] | None = None) -> dict:
         """Mix and master `plan`. Returns the audio and its measurements."""
         stems = stems or self.stems
         cache = self._clean_all(stems, self.cleaned if cache is None else cache)
+        speed = float(plan["master"].get("speed", 1.0))
+        semitones = int(plan["master"].get("semitones", 0))
+        if speed != 1.0 or semitones:
+            cache = self._at_speed(stems, cache, speed, semitones)
         t0 = time.time()
-        bus, processed, mix_report = mixdown(stems, plan, self.cfg, verbose=False, cleaned=cache)
+        bpm = self.tempo_bpm * speed if self.tempo_bpm else None   # a synced echo follows the tempo
+        bus, processed, mix_report = mixdown(stems, plan, self.cfg, verbose=False, cleaned=cache, bpm=bpm)
         final, master_report = master(bus, plan, self.cfg, verbose=False, reference=self.reference)
         sr = self.cfg.get("sample_rate", 48_000)
         bus_lufs = integrated_lufs(bus.mean(axis=1), sr)
@@ -276,10 +330,11 @@ class MixSession:
                 message, cur["plan"], self.stems, self.cfg, history=self.lineage(),
                 output_analysis=cur["output"], stem_levels=cur["levels"],
                 stem_analysis=self.analysis, use_llm=self.use_llm, provider=self.provider,
-                model=self.model, llm=self.llm,
+                model=self.model, llm=self.llm, tempo_bpm=self.tempo_bpm,
             )
             extra = {"rejected": turn["rejected"], "not_understood": turn["not_understood"],
                      "llm_error": turn.get("llm_error"), "model": self._answered_by(turn["source"])}
+            note += _without_stretch(turn, cur["plan"])
             if not turn["changes"]:
                 reply_only = {"n": None, "message": message, "reply": note + turn["reply"],
                               "source": turn["source"], "changes": [], **extra}
@@ -441,6 +496,7 @@ class MixSession:
         out["output"] = {k: o.get(k) for k in ("lufs", "true_peak_db", "crest_db", "lr_correlation")}
         out["stems"] = {n: {k: e.get(k) for k in ("role", "gain_db", "fader_db", "pan", "mute", "sends")}
                         for n, e in v["plan"]["stems"].items()} if "plan" in v else None
-        out["master"] = {k: v["plan"]["master"].get(k) for k in ("target_lufs", "ceiling_db")} \
+        out["master"] = {k: v["plan"]["master"].get(k)
+                         for k in ("target_lufs", "ceiling_db", "speed", "semitones")} \
             if "plan" in v else None
         return json_safe(out)

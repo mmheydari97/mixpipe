@@ -1,0 +1,67 @@
+/* Chord sheets (static/sheet.js): the chord finder's page and the splitter's
+   chords & lyrics panel. common.css loads first. */
+
+.sheet {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 22px 24px; font-size: 17px;
+}
+.sheet .line {
+  display: flex; flex-wrap: wrap; align-items: flex-end; column-gap: .32em; row-gap: 6px;
+  margin: 0 0 14px;
+}
+.sheet .line.stanza { margin-top: 30px; }
+.cell { display: inline-flex; flex-direction: column; align-items: flex-start; }
+.cell .chords { display: flex; gap: 3px; min-height: 1.75em; align-items: flex-end; }
+.word { cursor: pointer; border-radius: 4px; padding: 0 1px; }
+.word:hover { background: var(--surface-2); }
+.word.active { background: var(--active); }
+.wordgroup { display: inline-flex; align-items: flex-end; }
+.wordgroup > .cell.syl + .cell.syl { margin-inline-start: -1px; }   /* syllables read as one word */
+.wordgroup.active .word { background: var(--active); }
+.word.part { padding: 0; }
+.word.approx { text-decoration: underline dotted var(--muted); text-underline-offset: 4px; }
+.line.instrumental { align-items: center; gap: 6px; }
+.line.instrumental .tag { font-size: .75em; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-inline-end: 6px; }
+.line.instrumental .sep { color: var(--border); }
+
+.chip {
+  font: 700 .82em/1.2 var(--mono); color: var(--chord); background: transparent;
+  border: 1px solid transparent; border-radius: 6px; padding: 2px 5px;
+  direction: ltr; unicode-bidi: isolate; white-space: nowrap;
+}
+.chip:hover, .chip[aria-expanded=true] { border-color: var(--chord); background: var(--accent-soft); }
+.chip.alt::after { content: "•"; margin-left: 2px; color: var(--accent); }
+.chip.custom::after { content: "✎"; margin-left: 2px; font-weight: 400; }
+.chip.active { background: var(--active); border-color: transparent; }
+.chip.carry { opacity: .45; font-weight: 500; padding: 2px 1px; }
+.chip.carry::before { content: "("; margin-inline-end: -.3ch; }
+.chip.carry::after { content: ")"; margin-inline-start: -.3ch; }
+
+/* ---------- key change marker ---------- */
+.keychg-wrap { display: inline-flex; align-items: flex-end; gap: 4px; }
+.keychg {
+  font: 600 .7em/1.2 -apple-system, system-ui, sans-serif; color: var(--accent);
+  border: 1px solid var(--accent); border-radius: 999px; padding: 1px 7px; white-space: nowrap;
+  direction: ltr; unicode-bidi: isolate;
+}
+
+/* ---------- bars ---------- */
+.bars { display: flex; flex-wrap: wrap; align-items: center; }
+.barcell {
+  display: inline-flex; align-items: center; gap: 4px; min-width: 4.5em;
+  padding: 0 10px; border-inline-start: 1px solid var(--border);
+}
+.barcell:last-child { border-inline-end: 1px solid var(--border); }
+.barcell .repeat { color: var(--muted); font-family: var(--mono); }
+.show-bars .cell.barline { border-inline-start: 1px solid var(--border); padding-inline-start: 5px; }
+
+/* ---------- now / next ---------- */
+.now { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); white-space: nowrap; }
+.now b { font-size: 1.5em; color: var(--chord); min-width: 3.5ch; }
+.now-label { font: .7em/1 -apple-system, system-ui, sans-serif; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+
+
+@media (max-width: 640px) {
+  .sheet { padding: 16px; font-size: 16px; }
+  .now { justify-content: center; }
+}

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# The mixer with AI edits: starts the ACE-Step server, then the mixer page.
+# Everything: starts the ACE-Step server (AI edits), then the home page with the
+# chord finder, the splitter and the mixer on one port (mixpipe.cli ui, :8760).
 # Ctrl+C stops both (an ACE-Step that was already running is left alone).
 #
-#   scripts/mix_studio.sh [mix-ui flags]       e.g. --port 8770 --no-browser
-#   make mix-studio ARGS="--no-browser"
+#   scripts/studio.sh [ui flags]       e.g. --port 8770 --no-browser
+#   make studio ARGS="--no-browser"
 #
 # ACESTEP_DIR    the ACE-Step 1.5 checkout (default ../ACE-Step-1.5; make install-acestep)
 # ACESTEP_PORT   its port (default 8001)
@@ -39,7 +40,7 @@ if acestep_up; then
 elif [[ ! -d "$ACESTEP_DIR" ]]; then
     echo "ACE-Step isn't installed at $ACESTEP_DIR."
     echo "  make install-acestep   (about 11 GB with the model)"
-    echo "Starting the mixer without AI edits."
+    echo "Starting without AI edits."
 elif ! command -v uv >/dev/null; then
     echo "ACE-Step needs uv (brew install uv). Starting the mixer without AI edits."
 else
@@ -53,7 +54,7 @@ else
         if ! kill -0 "$ACE_PID" 2>/dev/null; then
             echo "ACE-Step exited; last lines of the log:"
             tail -n 15 "$LOG"
-            echo "Starting the mixer without AI edits."
+            echo "Starting without AI edits."
             ACE_PID=""
             break
         fi
@@ -68,7 +69,7 @@ else
     fi
 fi
 
-# ---- mixer ---------------------------------------------------------------
-echo "starting the mixer ..."
+# ---- the tools -------------------------------------------------------------
+echo "starting the chord finder, splitter and mixer ..."
 cd "$ROOT"
-PYTHONPATH=src "$PY" -m mixpipe.cli mix-ui "$@"
+PYTHONPATH=src "$PY" -m mixpipe.cli ui "$@"

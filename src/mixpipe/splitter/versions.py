@@ -21,7 +21,7 @@ from typing import Callable
 
 import numpy as np
 
-from . import stretch
+from .. import stretch
 from .pipeline import STEM_NAMES, stem_path
 
 KEEP = 3
@@ -33,6 +33,16 @@ def version_key(speed: float, semitones: int) -> str | None:
     if speed == 1 and semitones == 0:
         return None
     return f"x{round(speed * 100):03d}{semitones:+03d}"
+
+
+def speed_of(key: str | None) -> float:
+    """The speed a version key was made at ("x070+02" -> 0.7; None, the original -> 1)."""
+    return int(key[1:4]) / 100 if key else 1.0
+
+
+def semitones_of(key: str | None) -> int:
+    """The key change a version key was made with ("x070+02" -> 2; None -> 0)."""
+    return int(key[4:]) if key else 0
 
 
 def version_dir(song_dir: Path, key: str) -> Path:
@@ -51,37 +61,40 @@ def ready_quality(song_dir: Path, key: str) -> str | None:
     return None
 
 
+def is_voice(name: str) -> bool:
+    """The stem whose formants are kept when the key moves."""
+    return name == "vocals"
+
+
+def load_stems(song_dir: Path, folder: Path | None = None) -> tuple[int, dict[str, np.ndarray]]:
+    """(sr, {name: frames x 2}) of the song's stems, or of a version's `folder`."""
+    import soundfile as sf
+
+    stems, sr = {}, 0
+    for name in STEM_NAMES:
+        path = folder / f"{name}.flac" if folder else stem_path(song_dir, name)
+        stems[name], sr = sf.read(str(path), dtype="float32", always_2d=True)
+    return sr, stems
+
+
 def make(song_dir: Path, speed: float, semitones: int, quality: str,
          cancelled: Callable[[], bool] | None = None,
          progress: Callable[[float], None] | None = None) -> Path:
-    """Stretch every stem (in parallel, one Rubber Band process each) into
-    versions/<key>/<quality>/. The folder only appears once it's complete.
-    `progress(fraction)` gets the average over the stems."""
+    """Stretch every stem (stretch.stretch_stems: in parallel, one Rubber Band
+    process each) into versions/<key>/<quality>/. The folder only appears once
+    it's complete. `progress(fraction)` gets the average over the stems."""
     import soundfile as sf
 
     vdir = version_dir(song_dir, version_key(speed, semitones))
     tmp = vdir / f".{quality}-partial"
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
-    done = dict.fromkeys(STEM_NAMES, 0.0)
-
-    def stem_progress(name: str) -> Callable[[float], None]:
-        def report(frac: float) -> None:
-            done[name] = frac
-            if progress:
-                progress(sum(done.values()) / len(done))
-        return report
-
-    def one(name: str) -> None:
-        y, sr = sf.read(str(stem_path(song_dir, name)), dtype="float32", always_2d=True)
-        z = stretch.stretch(y, sr, speed, semitones, quality,
-                            formant=name == "vocals" and semitones != 0, cancelled=cancelled,
-                            progress=stem_progress(name))
-        sf.write(str(tmp / f"{name}.flac"), np.clip(z, -1, 1), sr, format="FLAC", subtype="PCM_16")
-
     try:
-        with ThreadPoolExecutor(len(STEM_NAMES)) as pool:
-            list(pool.map(one, STEM_NAMES))
+        sr, stems = load_stems(song_dir)
+        stretched = stretch.stretch_stems(stems, sr, speed, semitones, quality, formant=is_voice,
+                                          cancelled=cancelled, progress=progress)
+        for name, z in stretched.items():
+            sf.write(str(tmp / f"{name}.flac"), np.clip(z, -1, 1), sr, format="FLAC", subtype="PCM_16")
         out = vdir / quality
         shutil.rmtree(out, ignore_errors=True)
         tmp.rename(out)

@@ -91,54 +91,64 @@
           <div class="card chat">
             <div class="card-head">
               <h2>Talk to the mix</h2>
-              <button id="model-btn" class="model-btn" aria-expanded="false" aria-controls="model-panel"></button>
+              <button id="engine-btn" class="engine-btn" aria-expanded="false" aria-controls="engine-panel"
+                title="Who answers: a mix model or the local AI editor">
+                <svg class="gear" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M19.4 13a7.5 7.5 0 0 0 0-2l2.1-1.6a.5.5 0 0 0 .1-.6l-2-3.5a.5.5 0 0 0-.6-.2l-2.5 1a7.3 7.3 0 0 0-1.7-1l-.4-2.6a.5.5 0 0 0-.5-.5h-4a.5.5 0 0 0-.5.4l-.4 2.7a7.3 7.3 0 0 0-1.7 1l-2.5-1a.5.5 0 0 0-.6.2l-2 3.5a.5.5 0 0 0 .1.6L4.6 11a7.5 7.5 0 0 0 0 2l-2.1 1.6a.5.5 0 0 0-.1.6l2 3.5c.1.2.4.3.6.2l2.5-1c.5.4 1.1.7 1.7 1l.4 2.6c0 .3.2.5.5.5h4c.3 0 .5-.2.5-.4l.4-2.7a7.3 7.3 0 0 0 1.7-1l2.5 1c.2.1.5 0 .6-.2l2-3.5a.5.5 0 0 0-.1-.6L19.4 13zM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"/></svg>
+                <span id="engine-label"></span>
+              </button>
             </div>
-            <div id="model-panel" class="model-panel" hidden>
-              <div id="session-model-picker"></div>
-              <div class="btn-row">
-                <button id="model-rules">Use the keyword rules instead</button>
-                <button id="model-close">Done</button>
+
+            <div id="engine-panel" class="engine-panel" hidden>
+              <div class="engine-choice" role="radiogroup" aria-label="What your messages do">
+                <label class="engine-opt">
+                  <input type="radio" name="engine" value="mix" checked>
+                  <span><b>Mix changes</b> <small class="badge">OpenRouter or keyword rules</small>
+                    <small class="muted">Levels, EQ, reverb, panning, tempo, key… re-rendered from the stems. Precise, and the audio stays here: only text goes to the model.</small></span>
+                </label>
+                <label class="engine-opt">
+                  <input type="radio" name="engine" value="ai">
+                  <span><b>AI edit</b> <small class="badge">local · ACE-Step</small> <small id="ai-status" class="badge"></small>
+                    <small class="muted">Rewrites the music itself on this machine: new parts in a range, or the whole clip re-styled.
+                      The result is audio, so mix changes made from it start again from the mix it came from.</small></span>
+                </label>
               </div>
-              <p class="muted small">Used from your next message on; earlier versions keep the model that made them.</p>
+              <div id="engine-mix-settings">
+                <div id="session-model-picker"></div>
+                <p id="no-key-note" class="muted small" hidden>No OPENROUTER_API_KEY is set, so the keyword rules
+                  read your messages (see .env_template).</p>
+                <div class="btn-row">
+                  <button id="model-rules">Use the keyword rules instead</button>
+                </div>
+                <p class="muted small">Used from your next message on; earlier versions keep the model that made them.</p>
+              </div>
+              <p id="engine-ai-settings" class="muted small" hidden></p>
+              <div class="btn-row end"><button id="engine-close">Done</button></div>
             </div>
+
             <ol id="chat-log" class="chat-log"></ol>
             <div class="suggestions" id="suggestions"></div>
+
+            <div id="ai-options" class="ai-options" hidden>
+              <div class="seg" role="radiogroup" aria-label="AI edit kind">
+                <label><input type="radio" name="ai-mode" value="repaint" checked> Repaint a range</label>
+                <label><input type="radio" name="ai-mode" value="cover"> Re-style all of it</label>
+              </div>
+              <div id="ai-range" class="ai-row">
+                <label>From <input id="ai-start" value="0:00" inputmode="decimal" aria-label="Start"></label>
+                <button type="button" id="ai-start-here" class="link" title="Set to the player position">← playhead</button>
+                <label>To <input id="ai-end" placeholder="end" inputmode="decimal" aria-label="End"></label>
+                <button type="button" id="ai-end-here" class="link" title="Set to the player position">← playhead</button>
+              </div>
+              <div id="ai-strength-row" class="ai-row" hidden>
+                <label>Strength <input type="range" id="ai-strength" min="0" max="1" step="0.05" value="0.7">
+                  <output id="ai-strength-val">0.7</output></label>
+                <small class="muted">Higher stays closer to the original.</small>
+              </div>
+            </div>
+
             <form id="chat-form" class="chat-form">
               <input id="chat-input" autocomplete="off" placeholder="e.g. the acoustic guitar is too loud" aria-label="Message">
               <button class="primary" id="chat-send">Send</button>
-            </form>
-          </div>
-
-          <div class="card ai-edit">
-            <div class="card-head">
-              <h2>AI edit</h2>
-              <span id="ai-status" class="badge"></span>
-            </div>
-            <p class="muted small">ACE-Step, running on this machine, rewrites the music of the version in A.
-              The result is a new version; mix changes made from it start again from its plan.</p>
-            <form id="ai-form">
-              <div class="tabs" role="tablist">
-                <button type="button" role="tab" id="ai-tab-repaint" aria-selected="true">Repaint a range</button>
-                <button type="button" role="tab" id="ai-tab-cover" aria-selected="false">Re-style all of it</button>
-              </div>
-              <div id="ai-range" class="ai-row">
-                <label class="field"><span>From</span><input id="ai-start" value="0:00" inputmode="decimal" aria-label="Start"></label>
-                <button type="button" id="ai-start-here" class="link">← playhead</button>
-                <label class="field"><span>To</span><input id="ai-end" placeholder="end" inputmode="decimal" aria-label="End"></label>
-                <button type="button" id="ai-end-here" class="link">← playhead</button>
-              </div>
-              <div id="ai-strength-row" class="ai-row" hidden>
-                <label class="field"><span>Strength <output id="ai-strength-val">0.7</output></span>
-                  <input type="range" id="ai-strength" min="0" max="1" step="0.05" value="0.7"></label>
-                <small class="muted">Higher stays closer to the original; lower reinterprets it more freely.</small>
-              </div>
-              <label class="field">
-                <span>Describe the music you want there</span>
-                <textarea id="ai-prompt" rows="2" placeholder="e.g. indie folk, a driving rock drum beat with crash cymbals"></textarea>
-              </label>
-              <div class="actions">
-                <button class="primary" id="ai-send">Edit with AI</button>
-              </div>
             </form>
           </div>
         </div>
