@@ -89,6 +89,19 @@ class BarGrid:
         s = max(0, bisect.bisect_right(self.bars_before, k) - 1)
         return self.beat_time(self.secs[s]["beat"] + (k - self.bars_before[s]) * self.secs[s]["m"])
 
+    def bars(self) -> list[dict]:
+        """Every bar from the first downbeat to the last tracked beat:
+        [{"start": the downbeat's time, "beats": the bar's beats}]. A metronome
+        accents these and counts in with the bar's length."""
+        out, k = [], 0
+        while True:
+            start = self.bar_start(k)
+            if start > self.bt[-1] + 1e-6:
+                return out
+            s = max(0, bisect.bisect_right(self.bars_before, k) - 1)
+            out.append({"start": round(start, 4), "beats": self.secs[s]["m"]})
+            k += 1
+
     def section_changes(self) -> list[dict]:
         """Where the meter changes after the first section: [{"bar", "time", "beats_per_bar"}]."""
         return [{"bar": self.bars_before[i], "time": self.bar_start(self.bars_before[i]),

@@ -46,7 +46,9 @@ import json
 from pathlib import Path
 
 from .config import DEFAULT_CONFIG, treatment_for
+from .fx import OFF_DB, SYNC
 from .io_utils import Stem
+from .stretch import MAX_SEMITONES, MAX_SPEED, MIN_SPEED
 
 # Hard safety rails. The advisor can't exceed these no matter what it returns.
 LIMITS = {
@@ -78,10 +80,20 @@ LIMITS = {
     "deess_db": (0.0, 18.0),
     "transient": (-1.0, 1.0),
     "crossover_hz": (40.0, 16000.0),
+    # the whole song's tempo (1.0 = as recorded) and key, Rubber Band's limits
+    "speed": (MIN_SPEED, MAX_SPEED),
+    "semitones": (-float(MAX_SEMITONES), float(MAX_SEMITONES)),
+    # the effects in fx.py, shared with the splitter
+    "drive": (0.0, 1.0),
+    "drive_tone": (0.0, 1.0),
+    "chorus_mix": (0.0, 1.0),
+    "chorus_rate_hz": (0.05, 5.0),
+    "chorus_depth_ms": (0.5, 10.0),
+    "tone_db": (-12.0, 12.0),
 }
 
 # A send at or below this is treated as off.
-SEND_OFF_DB = -60.0
+SEND_OFF_DB = OFF_DB
 
 MAX_EQ_BANDS = 6
 
@@ -178,7 +190,29 @@ def validate_stem_entry(entry: dict, fallback: dict) -> dict:
     out["comp"] = _validate_comp(
         entry.get("comp", fallback.get("comp", {})), fallback.get("comp", {})
     )
+    out.update(validate_fx(entry, fallback))
     return out
+
+
+def validate_fx(entry: dict | None, fallback: dict | None = None) -> dict:
+    """A stem's insert effects (fx.color): {"drive": {"amount", "tone"},
+    "chorus": {"mix", "rate_hz", "depth_ms"}}. The mixer's plan and the
+    splitter's settings both go through this."""
+    entry = entry if isinstance(entry, dict) else {}
+    fallback = fallback or {}
+
+    def part(name: str) -> dict:
+        given = entry.get(name, fallback.get(name, {}))
+        return given if isinstance(given, dict) else {}
+
+    d, c = part("drive"), part("chorus")
+    return {
+        "drive": {"amount": _clamp(d.get("amount", 0.0), "drive"),
+                  "tone": _clamp(d.get("tone", 0.5), "drive_tone", 0.5)},
+        "chorus": {"mix": _clamp(c.get("mix", 0.0), "chorus_mix"),
+                   "rate_hz": _clamp(c.get("rate_hz", 0.8), "chorus_rate_hz", 0.8),
+                   "depth_ms": _clamp(c.get("depth_ms", 3.0), "chorus_depth_ms", 3.0)},
+    }
 
 
 def validate_multiband(raw: dict | None, base: dict) -> dict:
@@ -222,6 +256,9 @@ def validate_send_buses(raw: dict | None, cfg: dict) -> dict:
             k: _clamp(given.get(k, default.get(k, 0.0)), k, default.get(k, 0.0))
             for k in keys
         }
+        if bus == "delay":      # a note value ("1/8") follows the tempo instead of delay_ms
+            sync = given.get("sync", default.get("sync", ""))
+            out[bus]["sync"] = sync if sync in SYNC else ""
     return out
 
 
@@ -250,6 +287,8 @@ def validate_plan(plan: dict, stems: list[Stem], cfg: dict | None = None) -> dic
             ),
             "master_eq": [],
             "glue_comp": {},
+            "speed": round(_clamp(raw_master.get("speed", 1.0), "speed", 1.0), 2),
+            "semitones": int(round(_clamp(raw_master.get("semitones", 0), "semitones", 0.0))),
         },
     }
 
@@ -335,5 +374,7 @@ def describe_plan(plan: dict) -> str:
     lines.append(
         f"  master: target {m.get('target_lufs')} LUFS, "
         f"ceiling {m.get('ceiling_db')} dB"
+        + (f", speed {m['speed'] * 100:.0f}%" if m.get("speed", 1.0) != 1.0 else "")
+        + (f", key {m['semitones']:+d} st" if m.get("semitones") else "")
     )
     return "\n".join(lines)

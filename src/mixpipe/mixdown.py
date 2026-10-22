@@ -5,22 +5,23 @@ from __future__ import annotations
 import numpy as np
 
 from . import SAMPLE_RATE
-from .analysis import from_db, peak_db
+from .analysis import peak_db
 from .cleanup import clean_stem
 from .config import DEFAULT_CONFIG
 from .dynamics import (
     apply_gain_db, compress_with_settings, normalize_peak, transient_shaper,
 )
 from .eq import apply_eq_chain, deesser
+from .fx import color, send_returns
 from .io_utils import Stem, pad_to_common_length
 from .panning import pan_mono_to_stereo
 from .plan import SEND_OFF_DB, validate_send_buses
-from .reverb import algorithmic_reverb, slap_delay
 
 
 def process_stem(stem: Stem, settings: dict, cfg: dict, do_cleanup: bool = True,
                  cleaned: Stem | None = None) -> Stem:
-    """Full per-stem chain: cleanup -> trim -> EQ -> shape -> compress -> de-ess -> pan.
+    """Full per-stem chain: cleanup -> trim -> EQ -> shape -> compress -> de-ess ->
+    drive/chorus (fx.color) -> fader -> pan.
 
     Order matters. `gain_db` is a trim into the chain (so the compressor sees a
     consistent level); `fader_db` sets the level after it. Cleanup first so the compressor isn't reacting to noise. EQ
@@ -53,6 +54,7 @@ def process_stem(stem: Stem, settings: dict, cfg: dict, do_cleanup: bool = True,
             audio, s.sr, freq=ds.get("freq_hz", 6500.0),
             max_reduction_db=ds["max_reduction_db"],
         )
+    audio = color(audio, s.sr, settings)        # the effects the splitter shares (fx.py)
     # the fader: level after the chain, so a level change isn't undone by the compressor
     if abs(settings.get("fader_db", 0.0)) > 1e-6:
         audio = apply_gain_db(audio, settings["fader_db"])
@@ -86,12 +88,14 @@ def mixdown(
     do_cleanup: bool = True,
     verbose: bool = True,
     cleaned: dict[str, Stem] | None = None,
+    bpm: float | None = None,
 ) -> tuple[np.ndarray, list[Stem], dict]:
     """Process and sum every stem.
 
     Returns (stereo bus, processed stems, report). The bus is left at whatever
     level the sum produced, then trimmed to the configured headroom so the
-    master chain has room to work.
+    master chain has room to work. `bpm` (the tempo as rendered) sets a delay
+    that is synced to a note value.
     """
     cfg = cfg or DEFAULT_CONFIG
     processed: list[Stem] = []
@@ -129,7 +133,7 @@ def mixdown(
         raise RuntimeError("every stem was skipped or muted, nothing to mix")
 
     bus = sum_bus(processed)
-    sends = add_send_buses(processed, plan, cfg)
+    sends = add_send_buses(processed, plan, cfg, bpm=bpm)
     if sends.shape[0] > bus.shape[0]:           # reverb/delay tails run past the dry mix
         bus = np.pad(bus, ((0, sends.shape[0] - bus.shape[0]), (0, 0)))
     bus[: sends.shape[0]] += sends
@@ -175,58 +179,23 @@ def export_stems(
     ]
 
 
-def _as_stereo(audio: np.ndarray) -> np.ndarray:
-    return np.stack([audio, audio], axis=1) if audio.ndim == 1 else audio
-
-
 def add_send_buses(
-    processed: list[Stem], plan: dict, cfg: dict | None = None
+    processed: list[Stem], plan: dict, cfg: dict | None = None, bpm: float | None = None,
 ) -> np.ndarray:
-    """Shared reverb/delay returns, to be summed in parallel with the dry bus.
-
-    Each stem feeds the buses at its own send level (`plan["stems"][n]["sends"]`,
-    dB, -60 = off). Each bus then runs once on the summed sends, so every
-    instrument sits in the *same* room: that is what stops a mix of close-miked
-    dry sources sounding like separate recordings. Returns a stereo array as
-    long as the longest stem or its reverb tail, whichever is longer; all zeros
-    when the buses are off or nothing is sent.
+    """Shared reverb/delay returns, to be summed in parallel with the dry bus:
+    fx.send_returns fed by each stem at its own send level
+    (`plan["stems"][n]["sends"]`, dB, -60 = off). Returns a stereo array as long
+    as the longest stem or its reverb tail, whichever is longer; all zeros when
+    the buses are off or nothing is sent.
     """
     cfg = cfg or DEFAULT_CONFIG
     n = max((s.n_samples for s in processed), default=0)
     sr = processed[0].sr if processed else SAMPLE_RATE
     if not processed or not cfg.get("sends", {}).get("enabled", True):
         return np.zeros((n, 2), dtype=np.float32)
-
-    buses = validate_send_buses(plan.get("send_buses"), cfg)
-    feeds = {"reverb": np.zeros((n, 2)), "delay": np.zeros((n, 2))}
-    used = {"reverb": False, "delay": False}
+    sources = []
     for s in processed:
         levels = plan.get("stems", {}).get(s.name, {}).get("sends", {})
-        audio = _as_stereo(s.audio)
-        for bus, key in (("reverb", "reverb_db"), ("delay", "delay_db")):
-            level = float(levels.get(key, SEND_OFF_DB))
-            if level > SEND_OFF_DB:
-                feeds[bus][: audio.shape[0]] += audio * float(from_db(level))
-                used[bus] = True
-
-    returns = []
-    if used["reverb"]:
-        p = buses["reverb"]
-        wet = algorithmic_reverb(
-            feeds["reverb"].astype(np.float32), room_size=p["room_size"],
-            decay_s=p["decay_s"], mix=1.0, sr=sr, damping=p["damping"],
-            pre_delay_ms=p["pre_delay_ms"], width=p["width"],
-        )
-        returns.append(wet * float(from_db(p["return_db"])))
-    if used["delay"]:
-        p = buses["delay"]
-        wet = slap_delay(
-            feeds["delay"].astype(np.float32), delay_ms=p["delay_ms"],
-            feedback=p["feedback"], mix=1.0, sr=sr, damping=p["damping"],
-        )
-        returns.append(wet * float(from_db(p["return_db"])))
-
-    out = np.zeros((max([n] + [r.shape[0] for r in returns]), 2), dtype=np.float32)
-    for r in returns:
-        out[: r.shape[0]] += r
-    return out
+        sources.append((s.audio, float(levels.get("reverb_db", SEND_OFF_DB)),
+                        float(levels.get("delay_db", SEND_OFF_DB))))
+    return send_returns(sources, validate_send_buses(plan.get("send_buses"), cfg), sr, bpm=bpm)

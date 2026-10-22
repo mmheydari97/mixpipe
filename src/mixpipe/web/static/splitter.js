@@ -80,8 +80,20 @@ const P = {
   versionReq: 0, swapToken: 0, requestTimer: 0, pollTimer: 0,
   hq: { state: "idle", msg: "", progress: null },  // state: idle | pending | fast | fine | error
   keyPending: false, keyFlash: 0,
+  tempo: null,          // the song's BPM as recorded, once the chord finder has analysed it
+  analysis: null, analysisTimer: 0, heardTimer: 0, counting: false,
+  takes: [],            // recordings kept with the song (splitter/takes.py), played like stems
+  fxTimer: 0, fxError: "",
+  blobs: new Map(),     // url -> Promise<Blob>, so a new set reuses the stems it shares with the old
 };
-const M = { vol: {}, mute: {}, solo: {} };  // mixer state, saved per song
+// mixer state, saved per song; fx = { stems: {name: {bass, treble, drive, chorus, reverb, echo}},
+// room: {size, decay}, echo: {sync, ms, repeats} } (see effects.py on the server)
+const M = { vol: {}, mute: {}, solo: {}, fx: null };
+let FX_DEFAULTS = null;   // the room and echo a song starts with, from the server
+// the chord finder's sheet for the song, as the chords & lyrics panel shows it (sheet.js)
+const SH = { view: null, shift: 0, lyrics: false, timeline: [], chipNodes: new Map(), words: [],
+             activeChord: null, activeWord: null };
+const METRO = createMetronome();   // metronome.js
 
 const clock = () => P.set?.tracks[0]?.audio;
 // positions are in song time; a set made at 70% runs 1/0.7 times longer
@@ -94,23 +106,63 @@ function ensureContext() {
     P.master = P.ctx.createGain();
     P.master.connect(P.ctx.destination);
     P.master.gain.value = Number($("#master").value);
+    METRO.attach(P.ctx, P.master);
   }
   return P.ctx;
 }
 
-// v: { key, quality, speed, semi } of a server version, or null for the original stems
+function blobFor(url, label) {
+  if (!P.blobs.has(url)) {
+    P.blobs.set(url, fetch(apiUrl(url)).then((res) => {
+      if (!res.ok) throw new Error(`couldn't load ${label} (${res.status})`);
+      return res.blob();
+    }));
+    P.blobs.get(url).catch(() => P.blobs.delete(url));   // a failed fetch can be tried again
+  }
+  return P.blobs.get(url);
+}
+
+// keep only the stems the playing set (and the one being made) use
+function keepBlobs(...sets) {
+  const used = new Set(sets.flatMap((s) => (s ? Object.values(s.urls) : [])));
+  for (const url of P.blobs.keys()) if (!used.has(url)) P.blobs.delete(url);
+}
+
+// every channel the player plays: the six stems, then your takes ("take:<n>")
+const channels = (song) => [
+  ...song.stems.map((s) => ({ name: s.name, label: s.label, take: null })),
+  ...P.takes.map((t) => ({ name: `take:${t.n}`, label: t.name, take: t })),
+];
+
+// the version the page plays now, to make a set again with the same one
+const currentVersion = () => (P.set?.key
+  ? { key: P.set.key, quality: P.set.quality, speed: P.set.speed, semi: P.set.semi } : null);
+
+// v: { key, quality, speed, semi } of a server version, or null for the original stems.
+// A stem with effects comes from the server's fx render of that version instead,
+// and a take as the server stretches it for that version.
 async function makeSet(song, v) {
   const base = v ? `/api/songs/${song.id}/versions/${v.key}/${v.quality}` : `/api/songs/${song.id}/stems`;
-  const blobs = await Promise.all(song.stems.map(async (s) => {
-    const res = await fetch(`${base}/${s.name}`);
-    if (!res.ok) throw new Error(`couldn't load ${s.label} (${res.status})`);
-    return res.blob();
-  }));
+  const urls = Object.fromEntries(song.stems.map((s) => [s.name, `${base}/${s.name}`]));
+  for (const t of P.takes) {
+    // the take's placement in the URL, so a nudged take isn't taken from the blob cache
+    const at = `at=${encodeURIComponent(t.latency_ms)}`;
+    urls[`take:${t.n}`] = `/api/songs/${song.id}/takes/${t.n}?` +
+      (v ? `version=${encodeURIComponent(v.key)}&quality=${v.quality}&${at}` : at);
+  }
+  const fxKey = fxActive() ? JSON.stringify(fxSettings()) : "";
+  if (fxKey) {
+    const res = await api(`/api/songs/${song.id}/fx`, jsonBody("POST", {
+      version: v?.key ?? null, quality: v?.quality ?? null, settings: fxSettings(), tempo: P.tempo }));
+    Object.assign(urls, res.stems);
+  }
+  const chans = channels(song);
+  const blobs = await Promise.all(chans.map((c) => blobFor(urls[c.name], c.label)));
   const ctx = ensureContext();
   const set = { key: v?.key ?? null, quality: v?.quality ?? null, speed: v?.speed ?? 1,
-                semi: v?.semi ?? 0, bus: ctx.createGain(), tracks: [] };
+                semi: v?.semi ?? 0, bus: ctx.createGain(), tracks: [], urls, fxKey };
   set.bus.connect(P.master);
-  set.tracks = song.stems.map((s, i) => {
+  set.tracks = chans.map((s, i) => {
     const audio = new Audio();
     audio.preload = "auto";
     audio.preservesPitch = true;
@@ -141,6 +193,8 @@ function dropSet(set) {
 
 function teardownPlayer() {
   pause();
+  clearTimeout(P.fxTimer);
+  P.blobs.clear();
   clearTimeout(P.requestTimer);
   clearTimeout(P.pollTimer);
   P.versionReq++;
@@ -156,6 +210,7 @@ async function setupPlayer(song) {
   if (token !== P.swapToken || song !== P.song) { dropSet(set); return; }  // left meanwhile
   P.set = set;
   applyGains(true);
+  renderFx();
   if (P.semi !== 0 || (P.speed !== 1 && P.engine === "rubberband")) scheduleVersion(0);
 }
 
@@ -170,11 +225,16 @@ const ready = (a) => a.readyState >= 3 || new Promise((r) => {
   a.addEventListener("canplay", r, { once: true });
 });
 
-async function play() {
-  if (!P.set) return;
+async function play({ countIn = true } = {}) {
+  if (!P.set || P.counting) return;
   await ensureContext().resume();
   const { a, b, on } = P.loop;
   if (on && a != null && b != null && (now() < a || now() >= b)) seek(a);
+  if (countIn && $("#count-in").checked && METRO.ready) {
+    P.counting = true;
+    try { await METRO.countIn(now(), P.speed); } finally { P.counting = false; }
+    if (!P.set) return;
+  }
   const set = P.set;
   const t = clock().currentTime;
   for (const tr of set.tracks) tr.audio.currentTime = t;
@@ -214,7 +274,8 @@ function showTime(t) {
 function tick() {
   if (!P.playing || !P.set) return;
   const { a, b, on } = P.loop;
-  if (on && a != null && b != null && now() >= b) {
+  if (on && a != null && b != null && now() >= b && !REC.rec) {
+    if ($("#count-in").checked && METRO.ready) { loopCountIn(a); return; }
     seek(a);
   } else {
     const t = clock().currentTime;
@@ -223,7 +284,18 @@ function tick() {
     }
     showTime(now());
   }
+  METRO.update(now(), P.speed, P.playing);
+  followSheet(now());
   P.raf = requestAnimationFrame(tick);
+}
+
+// a loop pass ended: back to A, a bar of clicks, then on
+async function loopCountIn(a) {
+  pause();
+  seek(a);
+  P.counting = true;
+  try { await METRO.countIn(a, P.speed); } finally { P.counting = false; }
+  if (P.set) play({ countIn: false });
 }
 
 // Swap to another set (a server version, or null = the original stems) without
@@ -264,6 +336,8 @@ async function swapTo(v) {
     next.bus.gain.value = 1;
     dropSet(old);
   }
+  keepBlobs(next);
+  renderFx();
   return true;
 }
 
@@ -275,6 +349,7 @@ function setSpeed(speed) {
   P.speed = speed;
   if (P.set) for (const tr of P.set.tracks) tr.audio.defaultPlaybackRate = tr.audio.playbackRate = rateFor(P.set);
   renderSpeed();
+  renderAnalysis();
   saveMix();
   if (P.engine === "rubberband") scheduleVersion();
 }
@@ -286,6 +361,8 @@ function setKey(semi) {
   renderKey();
   saveMix();
   scheduleVersion();
+  clearTimeout(P.heardTimer);          // the key and the chords as you'll hear them
+  P.heardTimer = setTimeout(() => { if (P.analysis?.state === "done") loadAnalysis(); }, 300);
 }
 
 function setEngine(engine) {
@@ -456,17 +533,344 @@ function applyGains(instant = false) {
 }
 
 function renderStrips(song) {
-  $("#strips").replaceChildren(...song.stems.map((s) => {
+  $("#strips").replaceChildren(...channels(song).flatMap((s) => {
     const vol = el("input", { type: "range", min: "0", max: "1", step: "0.01", "aria-label": `${s.label} volume` });
     vol.addEventListener("input", () => { M.vol[s.name] = Number(vol.value); M.mute[s.name] = false; applyGains(); saveMix(); });
     const toggle = (kind) => () => { M[kind][s.name] = !M[kind][s.name]; applyGains(); saveMix(); };
-    return el("div", { class: "strip", dataset: { name: s.name } },
-      el("span", { class: "name" }, s.label),
+    const get = el("button", { class: "get", title: `Download ${s.label} on its own (full level, current speed, key and effects)`,
+      "aria-label": `Download ${s.label}`, onclick: (e) => download(s.name, e.currentTarget) }, "⤓");
+    const common = [
       el("button", { class: "mute", title: `Mute ${s.label}`, "aria-pressed": "false", onclick: toggle("mute") }, "M"),
       el("button", { class: "solo", title: `Solo ${s.label}`, "aria-pressed": "false", onclick: toggle("solo") }, "S"),
-      vol,
-      el("output", {}, "100%"));
+      vol, el("output", {}, "100%")];
+    if (s.take) {
+      const n = s.take.n;
+      return [el("div", { class: "strip take", dataset: { name: s.name } },
+        el("span", { class: "name" }, s.label,
+          el("button", { class: "link del", title: `Delete ${s.label}`, onclick: (e) => deleteTake(n, e.currentTarget) }, "✕")),
+        ...common,
+        el("span", { class: "nudge-take", title: "Move the take if it's early or late against the backing" },
+          el("button", { onclick: () => nudgeTake(n, -10), "aria-label": `${s.label} 10 ms earlier` }, "−"),
+          el("button", { onclick: () => nudgeTake(n, 10), "aria-label": `${s.label} 10 ms later` }, "+")),
+        get)];
+    }
+    return [el("div", { class: "strip", dataset: { name: s.name } },
+      el("span", { class: "name" }, s.label), ...common,
+      el("button", { class: "fx-btn", title: `Effects on ${s.label}`, "aria-expanded": "false",
+        onclick: (e) => toggleFxRow(s.name, e.currentTarget) }, "FX"),
+      get), fxRow(s.name)];
   }));
+  renderFxButtons();
+}
+
+// ---- takes: you, recorded over the backing (splitter/takes.py) -----------------
+
+const REC = { stream: null, rec: null, chunks: [], start: 0, speed: 1, semi: 0, latency: 0 };
+
+async function toggleRecord() {
+  if (REC.rec) {
+    if (REC.rec.state !== "inactive") REC.rec.stop();   // saveTake runs when it has stopped
+    else { REC.rec = null; renderRecord(); }             // still counting in: just cancel
+    return;
+  }
+  const msg = $("#rec-msg");
+  try {
+    REC.stream ||= await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  } catch (e) { msg.textContent = `no microphone: ${e.message}`; return; }
+  const ctx = ensureContext();
+  // how late the mic hears you against what you heard: the output's delay, the input's
+  const input = REC.stream.getAudioTracks()[0]?.getSettings?.().latency || 0;
+  REC.latency = Math.round(((ctx.outputLatency || 0) + (ctx.baseLatency || 0) + input) * 1000);
+  REC.chunks = [];
+  REC.rec = new MediaRecorder(REC.stream);
+  REC.rec.ondataavailable = (e) => { if (e.data.size) REC.chunks.push(e.data); };
+  REC.rec.onstop = saveTake;
+  renderRecord();
+  const rec = REC.rec;
+  if (!P.playing) await play();               // with its count-in
+  if (REC.rec !== rec) return;                // cancelled meanwhile
+  if (!P.playing) { REC.rec = null; renderRecord(); return; }
+  REC.start = now(); REC.speed = P.speed; REC.semi = P.semi;
+  REC.rec.start();
+  msg.textContent = "recording… ■ or R stops";
+}
+
+async function saveTake() {
+  const rec = REC.rec;
+  REC.rec = null;
+  pause();
+  renderRecord();
+  const msg = $("#rec-msg");
+  const blob = new Blob(REC.chunks, { type: rec.mimeType || "audio/webm" });
+  if (!blob.size) { msg.textContent = "nothing was recorded"; return; }
+  const ext = blob.type.includes("mp4") ? "m4a" : blob.type.includes("ogg") ? "ogg" : "webm";
+  const fd = new FormData();
+  fd.append("file", blob, `take.${ext}`);
+  fd.append("start_s", REC.start); fd.append("speed", REC.speed);
+  fd.append("semitones", REC.semi); fd.append("latency_ms", REC.latency);
+  msg.textContent = "saving the take…";
+  try {
+    const take = await api(`/api/songs/${P.song.id}/takes`, { method: "POST", body: fd });
+    P.takes.push(take);
+    await takesChanged();
+    msg.textContent = `saved ${take.name} (${REC.latency} ms of audio delay taken off; use − / + on it if it's early or late)`;
+  } catch (e) { msg.textContent = `couldn't save the take: ${e.message}`; }
+}
+
+async function nudgeTake(n, ms) {
+  try {
+    const take = await api(`/api/songs/${P.song.id}/takes/${n}`, jsonBody("PATCH", { ms }));
+    P.takes = P.takes.map((t) => (t.n === n ? take : t));
+    await takesChanged();
+  } catch (e) { $("#rec-msg").textContent = e.message; }
+}
+
+async function deleteTake(n, btn) {
+  if (!btn.classList.contains("sure")) {            // two clicks, no dialog
+    btn.classList.add("sure"); btn.textContent = "delete?";
+    setTimeout(() => { btn.classList.remove("sure"); btn.textContent = "✕"; }, 3000);
+    return;
+  }
+  try {
+    await api(`/api/songs/${P.song.id}/takes/${n}`, { method: "DELETE" });
+    P.takes = P.takes.filter((t) => t.n !== n);
+    await takesChanged();
+  } catch (e) { $("#rec-msg").textContent = e.message; }
+}
+
+async function takesChanged() {
+  renderStrips(P.song);
+  applyGains(true);
+  await swapTo(currentVersion());
+}
+
+function renderRecord() {
+  const btn = $("#rec-btn");
+  btn.textContent = REC.rec ? "■ Stop" : "● Record";
+  btn.classList.toggle("recording", !!REC.rec);
+  btn.setAttribute("aria-pressed", String(!!REC.rec));
+}
+
+// ---- key, tempo, beats, chords: the chord finder's analysis (splitter/analysis.py) ----
+
+const busy = (st) => ["queued", "running"].includes(st?.state);
+
+async function loadAnalysis() {
+  if (!P.song) return;
+  const id = P.song.id;
+  clearTimeout(P.analysisTimer);
+  let st;
+  try { st = await api(`/api/songs/${id}/analysis?shift=${P.semi}`); } catch (e) { st = { state: "error", job: { error: e.message } }; }
+  if (P.song?.id !== id) return;
+  P.analysis = st;
+  if (st.state === "done") {
+    P.tempo = st.tempo || null;
+    METRO.setGrid(st.beat_times, st.bars);
+    if (!SH.view || SH.shift !== P.semi || SH.lyrics !== st.lyrics) loadSheet();
+  }
+  if (busy(st) || (st.state === "done" && busy(st.job))) P.analysisTimer = setTimeout(loadAnalysis, 1500);
+  renderAnalysis(); renderFxShared(); renderClick();
+}
+
+async function analyse(lyrics = false) {
+  try {
+    P.analysis = await api(`/api/songs/${P.song.id}/analyse`, jsonBody("POST", { lyrics }));
+  } catch (e) { P.analysis = { state: "error", job: { error: e.message } }; }
+  renderAnalysis();
+  loadAnalysis();
+}
+
+function renderAnalysis() {
+  const box = $("#song-facts");
+  const st = P.analysis;
+  if (!box) return;
+  if (!st || st.state === "none") {
+    box.replaceChildren(el("button", { onclick: () => analyse(false) }, "Find key, tempo & chords"),
+      el("small", { class: "muted" }, " the chord finder works it out from these stems (about a minute)"));
+  } else if (st.state === "done") {
+    const bpm = st.tempo ? Math.round(st.tempo * P.speed) : null;
+    const items = [el("span", { class: "badge", title: P.semi ? `Recorded in ${st.original_key_label}` : null },
+      `Key ${st.key_label || "?"}`)];
+    if (bpm) {
+      items.push(el("span", { class: "badge", title: P.speed !== 1 ? `${Math.round(st.tempo)} BPM as recorded` : null }, `${bpm} BPM`));
+      if (st.meter?.time_signature) items.push(el("span", { class: "badge" }, st.meter.time_signature));
+    } else {
+      items.push(el("span", { class: "badge", title: "The chord finder found no steady beat, so there's no tempo, bar grid or metronome" },
+        "no steady beat"));
+    }
+    if (busy(st.job)) items.push(el("small", { class: "muted" }, `adding lyrics… ${st.job.message || ""}`));
+    if (BASE && st.chords_id) items.push(el("a", { href: `/chords/#/song/${encodeURIComponent(st.chords_id)}` }, "open in the chord finder →"));
+    box.replaceChildren(...items);
+  } else if (st.state === "error" || st.state === "cancelled") {
+    box.replaceChildren(el("span", { class: "msg error" }, `Couldn't find the key and chords: ${st.job?.error || st.job?.message || st.state}`),
+      " ", el("button", { class: "link", onclick: () => analyse(false) }, "try again"));
+  } else {
+    const pct = st.job?.progress != null ? ` ${Math.round(st.job.progress * 100)}%` : "";
+    box.replaceChildren(el("span", { class: "muted small" }, `Finding key, tempo and chords… ${st.job?.message || st.state}${pct}`));
+  }
+  $("#chords-card").hidden = st?.state !== "done";
+  $("#lyrics-hint").hidden = !(st?.state === "done" && !st.lyrics && !busy(st.job));
+}
+
+async function loadSheet() {
+  const id = P.song.id, shift = P.semi;
+  let view;
+  try { view = await api(`/api/songs/${id}/sheet?shift=${shift}`); } catch { return; }
+  if (P.song?.id !== id || P.semi !== shift) return;
+  const byId = new Map(view.chords.map((c) => [c.id, c]));
+  Object.assign(SH, { view, shift, lyrics: !!P.analysis?.lyrics, timeline: chordTimeline(view),
+                      chipNodes: new Map(), activeChord: null, activeWord: null });
+  const chip = (cid, { carry = false } = {}) => {
+    const c = byId.get(cid);
+    const node = el("button", { class: "chip" + (carry ? " carry" : ""), onclick: () => seek(c.start),
+      title: carry ? "Still sounding from before this line" : `${fmtTime(c.start)}: play from here` }, displayOf(c));
+    if (!SH.chipNodes.has(cid)) SH.chipNodes.set(cid, []);
+    SH.chipNodes.get(cid).push(node);
+    return node;
+  };
+  const { rows, words } = sheetRows(view, chip, (t) => seek(t));
+  SH.words = words;
+  const sheet = $("#split-sheet");
+  sheet.dir = sheetDir(view);
+  sheet.replaceChildren(...(rows.length ? rows : [el("p", { class: "muted" }, "No chords found.")]));
+  followSheet(now());
+}
+
+function followSheet(t) {
+  if (!SH.view) return;
+  const { cur, next } = followChord(SH.timeline, SH.chipNodes, t, SH);
+  $("#now-chord").textContent = cur ? displayOf(cur) : "–";
+  $("#next-chord").textContent = next
+    ? `${displayOf(next)} in ${Math.max(0, (next.start - t) / P.speed).toFixed(1)}s` : "–";
+  followWord(SH.words, t, SH, $("#follow").checked && P.playing);
+}
+
+function renderClick() {
+  const ready = METRO.ready;
+  for (const id of ["#click-on", "#count-in"]) {
+    $(id).disabled = !ready;
+    $(id).closest("label").title = ready ? "" : P.analysis?.state === "done"
+      ? "The chord finder found no steady beat in this song" : "Needs the song's beats: Find key, tempo & chords";
+  }
+  if (!ready) { $("#click-on").checked = false; METRO.on = false; }
+}
+
+// ---- effects (the mixer's fx.py, rendered per stem on the server) -------------
+
+// [key, label, min, max, step, how it reads]
+const FX_KNOBS = [
+  ["bass", "Bass", -12, 12, 1, (v) => (v ? `${v > 0 ? "+" : ""}${v} dB` : "0")],
+  ["treble", "Treble", -12, 12, 1, (v) => (v ? `${v > 0 ? "+" : ""}${v} dB` : "0")],
+  ["drive", "Drive", 0, 1, 0.05, (v) => (v ? `${Math.round(v * 100)}%` : "off")],
+  ["chorus", "Chorus", 0, 1, 0.05, (v) => (v ? `${Math.round(v * 100)}%` : "off")],
+  ["reverb", "Reverb", 0, 1, 0.05, (v) => (v ? `${Math.round(v * 100)}%` : "off")],
+  ["echo", "Echo", 0, 1, 0.05, (v) => (v ? `${Math.round(v * 100)}%` : "off")],
+];
+const stemFx = (name) => (M.fx.stems[name] ||= {});
+const hasFx = (e) => FX_KNOBS.some(([k]) => e?.[k]);
+const fxActive = () => !!P.song && P.song.stems.some((s) => hasFx(M.fx.stems[s.name]));
+// a send knob's 0..1 as the send level in dB (off below 0.5%), like a mixer's send
+const sendDb = (a) => (a > 0.005 ? Math.round((20 * Math.log10(a) - 6) * 10) / 10 : -60);
+
+function fxRow(name) {
+  const e = stemFx(name);
+  return el("div", { class: "fx-row", dataset: { fxFor: name }, hidden: true },
+    FX_KNOBS.map(([key, label, min, max, step, fmt]) => {
+      const out = el("output", {}, fmt(e[key] || 0));
+      const input = el("input", { type: "range", min, max, step, value: e[key] || 0, "aria-label": `${label}, ${name}` });
+      input.addEventListener("input", () => {
+        stemFx(name)[key] = Number(input.value);
+        out.textContent = fmt(Number(input.value));
+        renderFxButtons(); saveMix(); scheduleFx();
+      });
+      return el("label", { class: "knob" }, el("span", {}, label), input, out);
+    }));
+}
+
+function toggleFxRow(name, btn) {
+  const row = document.querySelector(`.fx-row[data-fx-for="${name}"]`);
+  row.hidden = !row.hidden;
+  btn.setAttribute("aria-expanded", String(!row.hidden));
+}
+
+function renderFxButtons() {
+  for (const strip of document.querySelectorAll(".strip")) {
+    strip.querySelector(".fx-btn")?.classList.toggle("on", hasFx(M.fx.stems[strip.dataset.name]));
+  }
+  $("#fx-reset").hidden = !fxActive();
+}
+
+function fxSettings() {
+  const stems = {};
+  for (const s of P.song.stems) {
+    const e = M.fx.stems[s.name] || {};
+    stems[s.name] = { bass_db: e.bass || 0, treble_db: e.treble || 0, drive: e.drive || 0,
+                      chorus: e.chorus || 0, reverb_db: sendDb(e.reverb || 0), delay_db: sendDb(e.echo || 0) };
+  }
+  const { room, echo } = M.fx;
+  return { stems, send_buses: {
+    reverb: { room_size: room.size, decay_s: room.decay },
+    delay: { delay_ms: echo.ms, feedback: echo.repeats, sync: P.tempo ? echo.sync : "" } } };
+}
+
+// effects changed: make a set with them (same version), after a short pause
+function scheduleFx() {
+  clearTimeout(P.fxTimer);
+  P.fxError = "";
+  renderFx();
+  if (!P.set) return;
+  P.fxTimer = setTimeout(async () => {
+    try { await swapTo(currentVersion()); } catch (e) { P.fxError = e.message; renderFx(); }
+  }, 400);
+}
+
+function renderFx() {
+  const msg = $("#fx-msg");
+  const want = fxActive() ? JSON.stringify(fxSettings()) : "";
+  msg.classList.toggle("error", !!P.fxError);
+  msg.textContent = P.fxError ? `effects failed: ${P.fxError}`
+    : P.set && want !== P.set.fxKey ? "applying effects…" : want ? "✓ effects on" : "";
+}
+
+function renderFxShared() {
+  const { room, echo } = M.fx;
+  $("#room-size").value = room.size;
+  $("#room-decay").value = room.decay;
+  $("#room-decay-val").textContent = `${Number(room.decay).toFixed(1)} s`;
+  $("#echo-sync").value = P.tempo ? echo.sync : "";
+  for (const o of $("#echo-sync").options) {
+    o.disabled = !!o.value && !P.tempo;
+    o.title = o.disabled ? "Needs the song's tempo: analyse it first" : "";
+  }
+  $("#echo-ms").value = echo.ms;
+  $("#echo-ms-val").textContent = `${echo.ms} ms`;
+  $("#echo-ms-wrap").hidden = !!(P.tempo && echo.sync);
+  $("#echo-repeats").value = echo.repeats;
+}
+
+function bindFxShared() {
+  const on = (sel, apply) => $(sel).addEventListener("input", () => {
+    apply($(sel).value); renderFxShared(); saveMix(); scheduleFx();
+  });
+  on("#room-size", (v) => { M.fx.room.size = Number(v); });
+  on("#room-decay", (v) => { M.fx.room.decay = Number(v); });
+  on("#echo-sync", (v) => { M.fx.echo.sync = v; });
+  on("#echo-ms", (v) => { M.fx.echo.ms = Number(v); });
+  on("#echo-repeats", (v) => { M.fx.echo.repeats = Number(v); });
+  $("#fx-reset").addEventListener("click", () => {
+    M.fx = freshFx();
+    renderStrips(P.song); applyGains(true); renderFxShared(); saveMix(); scheduleFx();
+  });
+}
+
+function freshFx(saved = {}) {
+  const d = FX_DEFAULTS || { reverb: { room_size: 0.5, decay_s: 1.4 }, delay: { delay_ms: 250, feedback: 0.25 } };
+  return {
+    stems: saved.stems || {},
+    room: { size: d.reverb.room_size, decay: d.reverb.decay_s, ...(saved.room || {}) },
+    echo: { sync: "", ms: d.delay.delay_ms, repeats: d.delay.feedback, ...(saved.echo || {}) },
+  };
 }
 
 const PRESETS = {
@@ -521,6 +925,8 @@ function loadMix(id) {
   let saved = {};
   try { saved = JSON.parse(store.get(`mixpipe.splitter.${id}`) || "{}") || {}; } catch { /* corrupt */ }
   M.vol = saved.vol || {}; M.mute = saved.mute || {}; M.solo = saved.solo || {};
+  M.fx = freshFx(saved.fx || {});
+  P.fxError = "";
   P.speed = Math.round(Math.min(SPEED_MAX, Math.max(SPEED_MIN, Number(saved.speed) || 1)) * 10) / 10;
   P.semi = Math.round(Math.min(KEY_MAX, Math.max(-KEY_MAX, Number(saved.semi) || 0)));
   P.loop = { a: null, b: null, on: false, ...(saved.loop || {}) };
@@ -528,39 +934,34 @@ function loadMix(id) {
   P.keyPending = false; P.keyFlash = 0;  // nothing carried over from the previous song
   renderSpeed();
   renderKey();
+  renderFxShared();
 }
 
 // ---- download -------------------------------------------------------------
 
-async function downloadMix() {
-  const btn = $("#download-btn");
+// what = "mix" (stems x faders), a stem name (that stem at full level) or
+// "stems" (every stem at full level, zipped); always at the page's speed and key
+async function download(what, btn) {
   const msg = $("#download-msg");
   const fmt = $("#fmt").value;
-  const gains = Object.fromEntries(P.song.stems.map((s) => [s.name, effectiveGain(s.name)]));
-  btn.disabled = true;
+  const id = P.song.id;
+  const body = { speed: P.speed, semitones: P.semi, fmt, fx: fxActive() ? fxSettings() : null, tempo: P.tempo };
+  let path = `/api/songs/${id}/stems/${what}/render`;
+  if (what === "mix") {
+    path = `/api/songs/${id}/render`;
+    body.gains = Object.fromEntries(channels(P.song).map((s) => [s.name, effectiveGain(s.name)]));
+  } else if (what === "stems") path = `/api/songs/${id}/stems.zip`;
+  if (btn) btn.disabled = true;
   // always Rubber Band: a file can't use the browser's stretch
   const cached = P.set?.quality === "fine" && P.set.speed === P.speed && P.set.semi === P.semi;
   msg.textContent = (P.speed !== 1 || P.semi !== 0) && !cached
     ? "rendering with Rubber Band (about 5 s per minute of song)…" : "rendering…";
   try {
-    const res = await fetch(`/api/songs/${P.song.id}/render`,
-      jsonBody("POST", { gains, speed: P.speed, semitones: P.semi, fmt }));
-    if (!res.ok) {
-      let detail = res.statusText;
-      try { detail = (await res.json()).detail || detail; } catch { /* not json */ }
-      throw new Error(detail);
-    }
-    const name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") || "")?.[1]
-      || `${P.song.id}.${fmt}`;
-    const url = URL.createObjectURL(await res.blob());
-    const a = el("a", { href: url, download: name });
-    document.body.append(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 10_000);
-    msg.textContent = `saved ${name}`;
+    msg.textContent = `saved ${await downloadFile(path, jsonBody("POST", body), `${id}.${fmt}`)}`;
   } catch (e) {
     msg.textContent = `failed: ${e.message}`;
   } finally {
-    btn.disabled = false;
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -588,6 +989,7 @@ async function openSong(id) {
     return;
   }
   P.song = song;
+  P.takes = song.takes || [];
   document.title = `${song.title} · MixPipe Splitter`;
   $("#song-title").textContent = song.title;
   const src = song.source;
@@ -597,8 +999,19 @@ async function openSong(id) {
       "From ", el("a", { href: src.page_url, target: "_blank", rel: "noopener noreferrer" }, src.site),
       src.note ? ` · ${src.note}` : "");
   }
+  // under the hub the mixer shares this library and this port
+  $("#song-links").hidden = !BASE;
+  $("#mix-link").href = `/mixer/#/new?splitter_song=${encodeURIComponent(id)}`;
+  FX_DEFAULTS ||= await api("/api/fx/defaults").catch(() => null);
+  clearTimeout(P.analysisTimer);
+  Object.assign(SH, { view: null, timeline: [], chipNodes: new Map(), words: [], activeChord: null, activeWord: null });
+  P.analysis = null; P.tempo = null;
+  METRO.setGrid([], []);
+  $("#split-sheet").replaceChildren();
   loadMix(id);
   renderStrips(song);
+  renderAnalysis(); renderClick();
+  loadAnalysis();
   $("#mixer-progress").replaceChildren(el("div", { class: "msg" }, "Loading the stems…"));
   try {
     await setupPlayer(song);
@@ -644,7 +1057,13 @@ function initMixer() {
   $("#set-b").addEventListener("click", () => setLoopPoint("b"));
   $("#loop-on").addEventListener("change", (e) => { P.loop.on = e.target.checked; renderLoop(); saveMix(); });
   $("#loop-clear").addEventListener("click", () => { P.loop = { a: null, b: null, on: false }; renderLoop(); saveMix(); });
-  $("#download-btn").addEventListener("click", downloadMix);
+  $("#download-btn").addEventListener("click", (e) => download("mix", e.currentTarget));
+  $("#stems-btn").addEventListener("click", (e) => download("stems", e.currentTarget));
+  bindFxShared();
+  $("#click-on").addEventListener("change", (e) => { METRO.on = e.target.checked; });
+  $("#click-vol").addEventListener("input", (e) => METRO.setVolume(Number(e.target.value)));
+  $("#add-lyrics").addEventListener("click", () => analyse(true));
+  $("#rec-btn").addEventListener("click", toggleRecord);
 
   document.addEventListener("keydown", (e) => {
     if ($("#mixer").hidden || typing(e) || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -653,7 +1072,10 @@ function initMixer() {
     else if (e.key === "ArrowRight") { e.preventDefault(); seek(now() + 5); }
     else if (e.key === "-" || e.key === "_") setSpeed(P.speed - SPEED_STEP);
     else if (e.key === "+" || e.key === "=") setSpeed(P.speed + SPEED_STEP);
-    else if (e.key === ",") setKey(P.semi - 1);
+    else if (e.key === "r" || e.key === "R") toggleRecord();
+    else if (e.key === "m" || e.key === "M") {
+      if (METRO.ready) { $("#click-on").checked = !$("#click-on").checked; METRO.on = $("#click-on").checked; }
+    } else if (e.key === ",") setKey(P.semi - 1);
     else if (e.key === ".") setKey(P.semi + 1);
     else if (e.key === "[") setLoopPoint("a");
     else if (e.key === "]") setLoopPoint("b");

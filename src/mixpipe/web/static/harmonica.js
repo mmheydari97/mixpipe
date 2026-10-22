@@ -1,7 +1,7 @@
 "use strict";
 // Harmonica tab: the melody as tab for a 12-hole chromatic or a 10-hole diatonic
 // harmonica in any key.
-// Load after app.js; uses its S, audio, synth, fmtTime, findAt, followWord,
+// Load after app.js; uses its S, audio, synth, and sheet.js's fmtTime, findAt, followWord,
 // showMenu, closeChordMenu, playSection, stopAudition, saveSettings, alertInline.
 
 const H = {
@@ -161,7 +161,7 @@ function renderHarmonica() {
     }
     const cells = row.words.map((w) => {
       const src = song.lines[row.line].words[w.i];
-      const { node, timing } = lyricCell(w, src, makeNoteChip, null);
+      const { node, timing } = lyricCell(w, src, makeNoteChip, null, seekPlay);
       H.words.push({ start: w.start, end: w.end, node: timing });
       return node;
     });
@@ -190,7 +190,7 @@ function harpTick(t) {
   }
   const next = H.timeline[i + 1];
   $("#next-chord").textContent = next ? `${noteLabel(next)} in ${Math.max(0, next.start - t).toFixed(1)}s` : "–";
-  followWord(H.words, t, H);
+  followWord(H.words, t, H, $("#follow").checked && !audio.paused);
 }
 
 // ---- note menu -----------------------------------------------------------------

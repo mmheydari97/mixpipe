@@ -12,7 +12,7 @@ input[type=range] { accent-color: var(--accent); }
 /* ---------- channel strips ---------- */
 .strips { display: grid; gap: 4px; }
 .strip {
-  display: grid; grid-template-columns: 7rem auto auto 1fr 3.5rem; align-items: center; gap: 10px;
+  display: grid; grid-template-columns: 7rem auto auto 1fr 3.5rem auto auto; align-items: center; gap: 10px;
   padding: 8px 10px; border-radius: 8px; background: var(--bg);
 }
 .strip .name { font-weight: 600; }
@@ -22,6 +22,20 @@ input[type=range] { accent-color: var(--accent); }
 .strip input[type=range] { width: 100%; }
 .strip output { font-family: var(--mono); font-size: .85em; text-align: right; color: var(--muted); }
 .strip.silent .name, .strip.silent input { opacity: .45; }
+.strip .fx-btn { font-size: .72em; letter-spacing: .04em; }
+.strip .fx-btn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
+
+/* ---------- effects ---------- */
+.fx-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px 22px;
+  margin: -2px 0 4px; padding: 10px 12px; border-radius: 0 0 8px 8px; background: var(--bg);
+  border-top: 1px dashed var(--border); }
+.knob { display: grid; grid-template-columns: 3.8rem 1fr 3.6rem; align-items: center; gap: 8px; font-size: .85em; }
+.knob span { color: var(--muted); }
+.knob input[type=range] { width: 100%; }
+.knob output { font-family: var(--mono); font-size: .9em; text-align: right; }
+.fx-shared label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.fx-shared input[type=range] { width: 90px; }
+#fx-msg.error { color: var(--danger); }
 
 /* ---------- practice controls ---------- */
 .practice { display: flex; flex-wrap: wrap; gap: 14px 28px; align-items: center; }
@@ -77,7 +91,9 @@ input[type=range] { accent-color: var(--accent); }
 .master input { width: 90px; }
 
 @media (max-width: 640px) {
-  .strip { grid-template-columns: 1fr auto auto; grid-template-areas: "name mute solo" "vol vol pct"; row-gap: 4px; }
+  .strip { grid-template-columns: 1fr auto auto auto auto; grid-template-areas: "name mute solo fx get" "vol vol vol vol pct"; row-gap: 4px; }
+  .strip .get { grid-area: get; }
+  .strip .fx-btn, .strip .nudge-take { grid-area: fx; }
   .strip .name { grid-area: name; }
   .strip .mute { grid-area: mute; }
   .strip .solo { grid-area: solo; }
@@ -91,3 +107,20 @@ input[type=range] { accent-color: var(--accent); }
   .dial { width: 100%; }
   .dial input[type=range], .key-dial input[type=range] { width: auto; flex: 1; min-width: 120px; }
 }
+
+/* ---------- key, tempo and the chord sheet (the chord finder's) ---------- */
+.facts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 0; min-height: 1.6em; }
+.facts .badge { font-size: .82em; }
+#chords-card .card-head { gap: 16px; }
+#chords-card .sheet { border: 0; box-shadow: none; background: transparent; padding: 6px 0 0; }
+#chords-card .now { margin-left: auto; }
+
+/* ---------- takes ---------- */
+.strip.take { background: color-mix(in srgb, var(--accent-soft) 45%, var(--bg)); }
+.strip.take .name { display: flex; align-items: center; gap: 6px; }
+.strip .del { font-size: .8em; padding: 0 4px; min-width: 0; color: var(--muted); }
+.strip .del.sure { color: var(--danger); }
+.nudge-take { display: inline-flex; gap: 2px; }
+.nudge-take button { min-width: 1.8rem; padding: 2px 6px; }
+.rec.recording { background: var(--danger); border-color: var(--danger); color: #fff; }
+.facts a { color: var(--accent); font-size: .9em; }

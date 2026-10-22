@@ -6,6 +6,7 @@
   <title>MixPipe Splitter</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23b4441f'/%3E%3Cg fill='white'%3E%3Crect x='7' y='9' width='3' height='15' rx='1.5'/%3E%3Crect x='14.5' y='6' width='3' height='18' rx='1.5'/%3E%3Crect x='22' y='12' width='3' height='12' rx='1.5'/%3E%3C/g%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/common.css">
+  <link rel="stylesheet" href="/static/sheet.css">
   <link rel="stylesheet" href="/static/splitter.css">
 </head>
 <body>
@@ -37,6 +38,8 @@
         <a href="#/" class="back">← Songs</a>
         <h1 id="song-title"></h1>
         <p id="song-source" class="source" hidden></p>
+        <p id="song-links" class="source" hidden><a id="mix-link">Mix these stems in the mixer →</a></p>
+        <p id="song-facts" class="facts" aria-live="polite"></p>
       </div>
 
       <div id="mixer-progress"></div>
@@ -101,19 +104,67 @@
             <label class="check small"><input id="loop-on" type="checkbox"> Loop A–B <kbd>L</kbd></label>
             <button id="loop-clear" class="link">clear</button>
           </div>
+          <div class="group" role="group" aria-label="Metronome">
+            <span class="lbl" title="Clicks on the song's own beats (found by the chord finder)">Click</span>
+            <label class="check small"><input id="click-on" type="checkbox"> metronome <kbd>M</kbd></label>
+            <label class="check small"><input id="count-in" type="checkbox"> count-in</label>
+            <input id="click-vol" type="range" min="0" max="1" step="0.05" value="0.7" aria-label="Click volume">
+          </div>
+          <div class="group" role="group" aria-label="Record">
+            <span class="lbl">Record</span>
+            <button id="rec-btn" class="rec" aria-pressed="false"
+              title="Record yourself over what's playing (R). The take is kept with the song as a channel.">● Record</button>
+            <span id="rec-msg" class="muted small" role="status" aria-live="polite"></span>
+          </div>
+          <div class="group fx-shared" role="group" aria-label="Room and echo">
+            <span class="lbl" title="Shared by every channel's Reverb and Echo knob (FX on a channel)">Room</span>
+            <label class="small">size <input id="room-size" type="range" min="0" max="1" step="0.05"></label>
+            <label class="small">decay <input id="room-decay" type="range" min="0.3" max="4" step="0.1">
+              <output id="room-decay-val"></output></label>
+            <span class="lbl">Echo</span>
+            <select id="echo-sync" aria-label="Echo time">
+              <option value="">free</option>
+              <option value="1/4">1/4 note</option>
+              <option value="1/8">1/8 note</option>
+              <option value="1/8d">dotted 1/8</option>
+              <option value="1/8t">1/8 triplet</option>
+              <option value="1/16">1/16 note</option>
+            </select>
+            <label class="small" id="echo-ms-wrap"><input id="echo-ms" type="range" min="40" max="1000" step="10"
+              aria-label="Echo time in ms"> <output id="echo-ms-val"></output></label>
+            <label class="small">repeats <input id="echo-repeats" type="range" min="0" max="0.9" step="0.05"></label>
+            <span id="fx-msg" class="muted small" role="status" aria-live="polite"></span>
+            <button id="fx-reset" class="link" hidden>reset effects</button>
+          </div>
           <div class="group">
-            <span class="lbl">Download this mix</span>
+            <span class="lbl">Download</span>
             <select id="fmt" aria-label="Format">
               <option value="mp3">MP3</option>
               <option value="wav">WAV</option>
+              <option value="flac">FLAC</option>
             </select>
-            <button id="download-btn">Download</button>
+            <button id="download-btn" title="The mix as you hear it: faders, mutes, speed and key">This mix</button>
+            <button id="stems-btn" title="Every stem on its own at full level, at the current speed and key, in one .zip">All stems (.zip)</button>
             <span id="download-msg" class="muted small"></span>
           </div>
         </div>
+        <div class="card" id="chords-card" hidden>
+          <div class="card-head">
+            <h2>Chords &amp; lyrics</h2>
+            <div class="now" aria-live="off">
+              <span class="now-label">now</span><b id="now-chord">–</b>
+              <span class="now-label">next</span><span id="next-chord">–</span>
+            </div>
+            <label class="check small"><input id="follow" type="checkbox" checked> follow playback</label>
+          </div>
+          <p id="lyrics-hint" class="muted small" hidden>No lyrics yet:
+            <button id="add-lyrics" class="link">add them</button> (local Whisper; the first time
+            downloads about 1.6 GB).</p>
+          <div id="split-sheet" class="sheet"></div>
+        </div>
         <p class="muted small keys">Keys: <kbd>Space</kbd> play/pause · <kbd>←</kbd>/<kbd>→</kbd> 5 s ·
           <kbd>[</kbd> / <kbd>]</kbd> set A / B · <kbd>L</kbd> loop on/off ·
-          <kbd>-</kbd> / <kbd>+</kbd> speed ±10% · <kbd>,</kbd> / <kbd>.</kbd> key ♭ / ♯</p>
+          <kbd>-</kbd> / <kbd>+</kbd> speed ±10% · <kbd>,</kbd> / <kbd>.</kbd> key ♭ / ♯ · <kbd>M</kbd> metronome · <kbd>R</kbd> record</p>
       </div>
     </section>
   </main>
@@ -133,6 +184,8 @@
   </footer>
 
   <script src="/static/common.js"></script>
+  <script src="/static/sheet.js"></script>
+  <script src="/static/metronome.js"></script>
   <script src="/static/splitter.js"></script>
 </body>
 </html>

@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import time
 from pathlib import Path
 from typing import Callable
@@ -92,6 +93,22 @@ def new_song_from_url(source: dict, root: Path, title: str | None = None) -> str
         })
         set_status(song_dir, "queued", "download", 0.0, "waiting")
     return song_id
+
+
+def copy_song(song_dir: Path, root: Path) -> str:
+    """Register a song another tool already has: the same id, title, source and
+    input files, so it isn't downloaded or uploaded again. Returns its id (an
+    existing song with that id is left as it is)."""
+    meta = read_meta(song_dir)
+    dest = Path(root) / meta["id"]
+    if not (dest / "meta.json").exists():
+        (dest / "inputs").mkdir(parents=True, exist_ok=True)
+        for name in meta["inputs"]:
+            shutil.copy2(Path(song_dir) / "inputs" / name, dest / "inputs" / name)
+        _write_json(dest / "meta.json", {k: meta[k] for k in ("id", "title", "created", "inputs", "source")
+                                         if k in meta})
+        set_status(dest, "queued", "decode", 0.0, "waiting")
+    return meta["id"]
 
 
 def download_inputs(song_dir: Path, report: Progress,

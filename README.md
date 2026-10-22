@@ -60,6 +60,21 @@ run as plain Python without it, and it is installed with the chord finder's
 requirements anyway). `rubberband` (`brew install rubberband`) gives cleaner pitch
 shifting, `fluidsynth` (`brew install fluid-synth`) renders MIDI.
 
+## One page for everything
+
+```bash
+make ui         # the chord finder, the splitter and the mixer on http://127.0.0.1:8760
+make studio     # the same, plus the ACE-Step server for the mixer's AI edits
+```
+
+The home page links to the three tools; each runs under its own path (`/chords/`,
+`/splitter/`, `/mixer/`) with a switcher in its top bar. They share one library:
+a song you split is in the mixer's "From the splitter" list, and a split song has a
+"Mix these stems" link. Each tool also still runs on its own port (`make chords-ui`
+on 8765, `split-ui` on 8766, `mix-ui` on 8767), but settings a page remembers
+(models, engine, per-song mixes) are per address, so they don't carry over between
+the single-tool ports and the home page.
+
 ## Usage
 
 ```bash
@@ -110,6 +125,7 @@ After the first mix, say what you hear and the mix changes:
 
 ```bash
 make mix-ui                                   # web page on http://127.0.0.1:8767
+make studio                                   # every tool on :8760, with ACE-Step for AI edits
 make chat STEMS=stems/                        # the same in the terminal
 make chat STEMS=out/splitter/<song id>/stems
 ```
@@ -141,13 +157,16 @@ How a turn works (`session.MixSession`, `advisor.revise_plan`):
   says what it didn't understand.
 - **Which model answers** is yours to pick. The page has a searchable OpenRouter
   picker when you start a mix (type `free` to put free models first; the last pick
-  is remembered), and a **Model** button in the chat card switches it between turns.
+  is remembered), and the gear button in the chat card switches it between turns.
   In the terminal, `/model` shows it, `/model <id>` switches, `/model rules` turns the
   model off, and `/models <words>` searches the catalogue. Each version records the
   model that made it. With nothing picked, the default is `advisor.openrouter_model`
   (`anthropic/claude-haiku-5.5`) when only `OPENROUTER_API_KEY` is set, otherwise the
-  configured provider. Models that only work through OpenRouter's batch API
-  (`:batch`) are left out of the picker. A turn takes the model's answer time plus
+  configured provider. The picker lists every model that can answer in text;
+  ones that also return audio or images (`gpt-audio`, `gpt-5-image`, Lyria) carry
+  a `+audio out` / `+image out` badge, and only their text is used. The catalogue
+  is fetched again after an hour. Models that only work through OpenRouter's batch
+  API (`:batch`) are left out of the picker. A turn takes the model's answer time plus
   2-4 s of rendering; a small free model may answer in a form the mixer can't use,
   and that message then goes to the keyword rules.
 - Each turn is a new version; nothing is thrown away. Undo goes back to the version
@@ -156,10 +175,75 @@ How a turn works (`session.MixSession`, `advisor.revise_plan`):
   just by being louder), faders and mutes that go through the same path, and
   Export. CLI commands: `/undo /redo /goto N /plan /levels /model [id] /models [words]
   /export [path] /quit`.
+- **Tempo and key**: "a little slower" (5%), "slower" (10%), "much faster" (20%),
+  "play it at 80%", "at 90 bpm" (the session measures the song's tempo), "up a
+  semitone", "a whole step lower", "original key". The stems are stretched with
+  Rubber Band before the mix (`stretch.py`, the code the splitter uses), with
+  formants kept on vocals when the key moves, and each stem keeps its loudness so the
+  balance doesn't shift. The first change at a new tempo takes a few seconds; turns
+  at the same tempo reuse it. Reverb and delay are added after the stretch, so tails
+  stay natural. The page shows Tempo (with BPM) and Key, and the A/B player compares
+  two versions at the same point of the song even when their speeds differ.
+- **Effects** (`fx.py`, the same code the splitter's effect knobs use): drive
+  ("make the guitar gritty", "the lead is too distorted"), chorus ("a little chorus
+  on the keys"), bass/treble on one stem ("more bass on the acoustic guitar"; a bare
+  "more bass" is still the bass stem's level), the shared room ("bigger room") and
+  echo ("1/8 note echo on the vocals" locks the echo to the song's tempo and follows
+  it when you slow the song down; "longer echo", "more repeats"). Drive and chorus
+  sit in each stem's chain after the de-esser, before its fader; reverb and echo are
+  the shared send buses.
 - Cleanup does not depend on the plan, so stems are cleaned once per session.
   Songs longer than 75 s are worked on as their loudest 45 s; Export renders the
   whole song with the current plan (measured on a 3:18 song with 6 stems: 39 s the
   first time, 18 s after that, since the full-length stems are then cleaned).
+
+### AI edits (ACE-Step)
+
+Chat changes the mix; an **AI edit** changes the music. A local
+[ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) server rewrites part of
+the version you are listening to from a prompt, and the result is the next version:
+
+```bash
+make install-acestep        # once: clones ../ACE-Step-1.5 and installs it (its own venv, ~11 GB)
+make studio                 # ACE-Step + the home page with every tool; Ctrl+C stops both
+make acestep                # or just the server, on http://127.0.0.1:8001
+```
+
+`make studio` (`scripts/studio.sh`) starts ACE-Step, waits until it answers,
+then starts `make ui`. An ACE-Step that's already running is used
+and left running. If ACE-Step isn't installed or fails to start, the mixer still
+starts without AI edits, and the script says why (log: `out/logs/acestep.log`).
+`ACESTEP_DIR` and `ACESTEP_PORT` override where it lives and listens.
+
+```
+mix> /ai 0:20-0:32 a driving rock drum beat with crash cymbals
+  ACE-Step repainted 0:20-0:32 of v1 (acestep-v15-turbo, 37 s). ...
+mix> /cover 0.7 lo-fi, tape saturation, dusty drums
+```
+
+- **Repaint** rewrites a time range and keeps everything else. The model returns
+  the whole clip, but outside the range MixPipe keeps the original samples
+  (`acestep.splice`, with 50 ms crossfades), so only the range changes.
+  **Cover** re-styles the whole clip; a higher strength stays closer to it,
+  a lower one reinterprets it more freely. What the model adds goes through the
+  master's limiter at the plan's ceiling, since it skipped the master chain.
+- The prompt describes the music you want in that stretch (style, instruments,
+  mood), not an instruction like "make the drums punchier". ACE-Step generates
+  new audio there, so voices and tones can drift from the original.
+- An AI edit is audio, not a plan, so it is a branch of the history. A chat turn
+  or a fader move while you listen to it is made from the plan it came from
+  (shown as "Mixed from vN"), and doesn't include the edit. Export writes the
+  edited audio as it is. In a preview session that's the 45 s preview; start the
+  session over the whole song to edit and export all of it.
+- The audio goes to the ACE-Step server on this machine (`ACESTEP_URL`), nowhere
+  else. On an M4 Pro (24 GB) with the turbo model, repainting part of a 47 s clip
+  took 21-37 s, plus about 2 minutes to load the model on the first edit.
+- In the web page there is one chat box. The gear button in its header switches what
+  your messages do: **Mix changes**, answered by the OpenRouter model you pick there or by
+  the keyword rules, or **AI edit**, done by local ACE-Step. In AI edit, a row above the
+  message box sets the range (with "← playhead" buttons) or the re-style strength, and the
+  message is the prompt. Both kinds of turn share one history. In the terminal it's
+  `/ai [start-end] <prompt>` and `/cover [strength] <prompt>`.
 
 ## Checking a mix
 
@@ -245,8 +329,12 @@ The reverse of the mix pipeline: give it one song (a file or a link) and it
 splits it into vocals, guitar, drums, bass, keys and other (Demucs
 `htdemucs_6s`). A practice mixer in the browser has a volume / mute / solo
 control per channel, 50%–300% speed without changing the key, key changes in
-semitone (one-fret) steps, an A–B loop, and "download this mix" (e.g. the song
-without guitar) as MP3 or WAV. Speed and key changes are made with Rubber Band
+semitone (one-fret) steps, an A–B loop, and downloads of the mix you hear (e.g.
+the song without guitar), of any stem, or of all stems in a zip, as MP3, WAV or FLAC.
+It also has per-channel effects (bass, treble, drive, chorus, reverb, echo; the mixer's
+own `fx.py`), the song's key and tempo, a metronome and count-in on its beats, its
+chords and lyrics following playback (all three from the chord finder, run on the
+splitter's stems), and recording yourself over it as extra channels. Speed and key changes are made with Rubber Band
 on the server (*Accurate*), or by the browser for speed alone (*Fast*).
 
 ```bash
@@ -304,7 +392,8 @@ share the install; see their sections above.
   which it did not understand.
 - Chat changes what the plan can express: levels, pan, EQ, compression, de-essing,
   sends, mutes, the master's loudness, ceiling, EQ and glue, the reverb and delay
-  buses. "Make it sound like the eighties" has no parameter; the model will say so
+  buses (room size, pre-delay, echo time or note value, repeats), drive and chorus
+  per stem, and the whole song's tempo and key. "Make it sound like the eighties" has no parameter; the model will say so
   rather than guess. It judges from measurements, not by listening.
 - Pitch correction is for one note at a time (voice, harmonica, a lead line).
   Chords need `shift_semitones`, which moves everything together.

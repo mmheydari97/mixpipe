@@ -12,6 +12,7 @@
     python -m mixpipe.cli chords-ui [--port 8765] [--workers N]
     python -m mixpipe.cli split   song.mp3 | https://...   (vocals / guitar / ... stems)
     python -m mixpipe.cli split-ui  [--port 8766]
+    python -m mixpipe.cli ui        [--port 8760]       (all three, with a home page)
 """
 
 from __future__ import annotations
@@ -235,6 +236,31 @@ def cmd_split_ui(args) -> int:
                   args.no_browser)
 
 
+_CLOCK = r"\d+(?::\d+)?(?:\.\d+)?"                  # 65, 65.5, 1:05, 1:05.5
+_RANGE = re.compile(rf"^({_CLOCK})-({_CLOCK})?$")      # 0:20-0:32, or 0:20- to the end
+
+
+def _seconds(clock: str) -> float:
+    """"1:05.5" or "65.5" -> 65.5"""
+    m, _, sec = clock.rpartition(":")
+    return (int(m) * 60 if m else 0) + float(sec)
+
+
+def parse_ai_edit(cmd: str, rest: str) -> dict:
+    """The options of `/ai [start-end] <prompt>` or `/cover [strength] <prompt>`."""
+    first, _, tail = rest.strip().partition(" ")
+    if cmd == "/ai":
+        m = _RANGE.match(first)
+        if m:
+            return {"mode": "repaint", "start_s": _seconds(m.group(1)),
+                    "end_s": _seconds(m.group(2)) if m.group(2) else None, "prompt": tail.strip()}
+        return {"mode": "repaint", "start_s": 0.0, "end_s": None, "prompt": rest.strip()}
+    try:
+        return {"mode": "cover", "strength": float(first), "prompt": tail.strip()}
+    except ValueError:
+        return {"mode": "cover", "strength": None, "prompt": rest.strip()}
+
+
 def cmd_chat(args) -> int:
     """Mix by talking: type what's wrong, hear the new version, /undo if worse."""
     from .session import MixSession
@@ -296,8 +322,29 @@ def cmd_chat(args) -> int:
         elif len(found) > 15:
             print(f"  ... {len(found) - 15} more; add words to narrow it down ('free' puts free ones first)")
 
+    def ai_command(cmd: str, rest: str) -> None:
+        from . import acestep
+
+        opts = parse_ai_edit(cmd, rest)
+        if not opts["prompt"]:
+            print("  usage: /ai [start-end] <prompt>   e.g. /ai 0:20-0:32 a driving rock drum beat\n"
+                  "         /cover [strength 0-1] <prompt>")
+            return
+        st = acestep.status()
+        if not st["ok"]:
+            print(f"  ACE-Step isn't running at {st['url']} (make acestep in another terminal)")
+            return
+        print(f"  asking ACE-Step ({st['model']}) ...")
+        try:
+            show(s.ai_edit(opts.pop("prompt"), **opts))
+        except ValueError as exc:
+            print(f"  {exc}")
+        except Exception as exc:  # noqa: BLE001 - keep the session
+            print(f"  ACE-Step failed: {exc}")
+
     show(s.first_mix(args.notes))
-    help_line = "/undo /redo /goto N /plan /levels /model [id] /models [words] /export [path] /quit"
+    help_line = ("/undo /redo /goto N /plan /levels /model [id] /models [words] "
+                 "/ai [start-end] <prompt> /cover [strength] <prompt> /export [path] /quit")
     print(f"type what to change, or {help_line}")
     while True:
         try:
@@ -321,6 +368,8 @@ def cmd_chat(args) -> int:
                 print("  no such version")
         elif cmd == "/plan":
             print(describe_plan(s.current["plan"]))
+        elif cmd == "/levels" and s.current.get("levels") is None:
+            print(f"  v{s.current['n']} is an AI edit: no per-stem levels")
         elif cmd == "/levels":
             for name, lv in s.current["levels"].items():
                 st = s.current["plan"]["stems"][name]
@@ -329,6 +378,8 @@ def cmd_chat(args) -> int:
             model_command(rest)
         elif cmd == "/models":
             models_command(rest)
+        elif cmd in ("/ai", "/cover"):
+            ai_command(cmd, rest)
         elif cmd == "/export":
             path = rest.strip() or str(out / f"mix_v{s.current['n']}_full.wav")
             print(f"  wrote {s.export(path, bit_depth=args.bit_depth)}")
@@ -345,6 +396,15 @@ def cmd_mix_ui(args) -> int:
 
     return _serve(create_app(args.out, splitter_root=args.splitter),
                   "mixer", args.host, args.port, args.no_browser)
+
+
+def cmd_ui(args) -> int:
+    try:
+        from .web.hub import create_app
+    except ImportError as exc:
+        raise RuntimeError(f"{CHORDS_DEPS_HINT} ({exc})") from exc
+    return _serve(create_app(args.chords_out, args.splitter_out, args.mixer_out, workers=args.workers),
+                  "tools", args.host, args.port, args.no_browser)
 
 
 def cmd_fetch_model(args) -> int:
@@ -423,6 +483,17 @@ def main(argv: list[str] | None = None) -> int:
     p_ct.add_argument("--model", default=None)
     p_ct.add_argument("--bit-depth", type=int, choices=[16, 24], default=24)
     p_ct.set_defaults(func=cmd_chat)
+
+    p_hub = sub.add_parser("ui", help="the chord finder, splitter and mixer on one port")
+    p_hub.add_argument("--host", default="127.0.0.1")
+    p_hub.add_argument("--port", type=int, default=8760)
+    p_hub.add_argument("--chords-out", default="out/chords", help="the chord finder's song store")
+    p_hub.add_argument("--splitter-out", default="out/splitter", help="the splitter's song store")
+    p_hub.add_argument("--mixer-out", default="out/mixer", help="mixer session directory")
+    p_hub.add_argument("--no-browser", action="store_true")
+    p_hub.add_argument("--workers", type=int, default=1,
+                       help="songs analysed or split at once, per tool (default 1)")
+    p_hub.set_defaults(func=cmd_ui)
 
     p_mu = sub.add_parser("mix-ui", help="start the mix-by-chat web UI")
     p_mu.add_argument("--host", default="127.0.0.1")

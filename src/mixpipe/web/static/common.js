@@ -22,16 +22,39 @@ const el = (tag, attrs = {}, ...children) => {
   return node;
 };
 
+// Where this page's app is mounted: "" when it runs on its own port, "/splitter"
+// etc. under the hub (`mixpipe.cli ui`). Every "/api/..." URL goes through apiUrl.
+const BASE = location.pathname.replace(/\/+$/, "");
+const apiUrl = (path) => (path.startsWith("/api/") ? BASE + path : path);
+
+// a failed response as an Error with the server's `detail` and the status
+async function failure(res) {
+  let detail = res.statusText;
+  try { detail = (await res.json()).detail || detail; } catch { /* not json */ }
+  const err = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  err.status = res.status;
+  return err;
+}
+
 async function api(path, opts = {}) {
-  const res = await fetch(path, opts);
-  if (!res.ok) {
-    let detail = res.statusText;
-    try { detail = (await res.json()).detail || detail; } catch { /* not json */ }
-    const err = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
-    err.status = res.status;
-    throw err;
-  }
+  const res = await fetch(apiUrl(path), opts);
+  if (!res.ok) throw await failure(res);
   return res.json();
+}
+
+// Fetch a file the server renders and save it; returns the name it was saved as
+// (from Content-Disposition: filename* first, so a title in any script survives).
+async function downloadFile(path, opts = {}, fallback = "download") {
+  const res = await fetch(apiUrl(path), opts);
+  if (!res.ok) throw await failure(res);
+  const cd = res.headers.get("Content-Disposition") || "";
+  const star = /filename\*=UTF-8''([^;]+)/i.exec(cd)?.[1];
+  const name = star ? decodeURIComponent(star) : (/filename="?([^";]+)"?/.exec(cd)?.[1] || fallback);
+  const href = URL.createObjectURL(await res.blob());
+  const a = el("a", { href, download: name });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 10_000);
+  return name;
 }
 const jsonBody = (method, data) => ({
   method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
@@ -179,6 +202,9 @@ function createModelPicker(container, kind, {
       else if (m.word_timing === "approx") badges.push(el("span", { class: "badge" }, "word timing ~"));
     } else {
       if ((m.input_modalities || []).includes("audio")) badges.push(el("span", { class: "badge" }, "audio in"));
+      for (const out of m.output_modalities || []) {
+        if (out !== "text") badges.push(el("span", { class: "badge" }, `+${out} out`));
+      }
       if (m.context_length) badges.push(el("span", { class: "badge" }, `${Math.round(m.context_length / 1000)}k ctx`));
     }
     return badges;
@@ -348,4 +374,16 @@ function createSourcePicker(container, { multiple = false, hint = "", onChange =
   link.addEventListener("keydown", (e) => { if (e.key === "Enter" && picker.hasInput()) onSubmit(); });
   render();
   return picker;
+}
+
+// =========================================================================
+// the other tools (only under the hub, where they share this page's port)
+// =========================================================================
+
+const TOOLS = [["/", "Home"], ["/chords/", "Chords"], ["/splitter/", "Splitter"], ["/mixer/", "Mixer"]];
+if (BASE) {
+  $(".topbar")?.append(el("nav", { class: "tools", "aria-label": "MixPipe tools" },
+    TOOLS.map(([href, label]) => el("a", {
+      href, "aria-current": href === `${BASE}/` ? "page" : null,
+    }, label))));
 }

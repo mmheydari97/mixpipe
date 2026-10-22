@@ -4,6 +4,7 @@
     s.first_mix()                              # version 1, from the rules (or LLM) advisor
     s.chat("the acoustic guitar is too loud")  # version 2: acoustic -3 dB, re-rendered
     s.undo()                                   # back to version 1
+    s.ai_edit("a driving rock beat", start_s=20, end_s=32)   # version 3: ACE-Step repaints 0:20-0:32
     s.export("out/final.wav")                  # the current plan over the whole song
 
 What makes a turn fast: cleanup (dehum, declick, denoise, gate) does not depend
@@ -15,6 +16,11 @@ Every version keeps its plan, what changed (computed from the plan diff), the
 measured output and each stem's level in the mix, so the history is a list of
 facts, not of what a model said it did. Audio never leaves the machine: a chat
 turn sends the message, the plan and measurements to the model, nothing else.
+
+An AI edit (`ai_edit`) is different: a local ACE-Step server (`acestep.py`)
+rewrites part of the version's audio. The result is audio, not a plan, so it is
+a leaf of the history: it keeps the plan it was made from as its `base`, and a
+chat turn or fader move made while listening to it continues from that base.
 """
 
 from __future__ import annotations
@@ -27,16 +33,18 @@ from pathlib import Path
 
 import numpy as np
 
+from . import acestep, stretch
 from .advisor import (apply_adjustments, diff_plans, llm_advisor, resolve_llm, revise_plan,
                       rules_advisor)
 from .analysis import analyze_all, analyze_master, integrated_lufs, masking_report
 from .cleanup import clean_stem
 from .config import load_config
-from .io_utils import Stem, load_stems, stems_mono, write_audio
+from .dynamics import limit
+from .io_utils import Stem, load_stems, read_audio, stems_mono, to_sample_rate, write_audio
 from .master import dither, master
 from .mixdown import mixdown
 from .plan import save_plan, validate_plan
-from .timing import align_stems
+from .timing import align_stems, estimate_tempo_bpm
 
 PREVIEW_S = 45.0          # slice length a long song is worked on in
 PREVIEW_OVER_S = 75.0     # songs longer than this get a preview slice
@@ -56,6 +64,40 @@ def llm_choice(cfg: dict, provider: str | None = None, model: str | None = None)
     if provider == "openrouter" and not os.environ.get("OPENROUTER_API_KEY"):
         return None
     return provider, model
+
+
+def _tempo_of(stems: list[Stem]) -> float | None:
+    """The song's tempo as recorded (BPM), from all the stems together."""
+    try:
+        n = max(s.n_samples for s in stems)
+        mono = np.zeros(n, dtype=np.float32)
+        for s in stems:
+            a = s.audio.mean(axis=1) if s.audio.ndim == 2 else s.audio
+            mono[: len(a)] += a
+        bpm = estimate_tempo_bpm(mono, stems[0].sr)
+        return round(float(bpm), 1) if bpm else None
+    except Exception:  # noqa: BLE001 - a tempo is a nicety, never a reason to fail
+        return None
+
+
+def _without_stretch(turn: dict, before: dict) -> str:
+    """Undo a tempo/key change in `turn` when Rubber Band can't make it; returns a note."""
+    m, was = turn["plan"]["master"], before["master"]
+    if (m.get("speed", 1.0), m.get("semitones", 0)) == (was.get("speed", 1.0), was.get("semitones", 0)):
+        return ""
+    try:
+        stretch.check_available(m.get("semitones", 0))
+        return ""
+    except stretch.StretchError as exc:
+        m["speed"], m["semitones"] = was.get("speed", 1.0), was.get("semitones", 0)
+        turn["changes"] = [c for c in turn["changes"] if c["param"] not in ("speed", "semitones")]
+        return f"(Tempo and key stay as they are: {exc}.) "
+
+
+def _clock(seconds: float) -> str:
+    """1:05, or 1:05.5 when it isn't a whole second."""
+    m, sec = divmod(round(seconds, 1), 60)
+    return f"{int(m)}:{sec:04.1f}" if sec % 1 else f"{int(m)}:{int(sec):02d}"
 
 
 def json_safe(obj):
@@ -112,6 +154,7 @@ class MixSession:
         self.align = align
         self.verbose = verbose
         self.llm = llm                       # injectable llm(system, payload) -> text
+        self.editor = None                   # injectable editor(path, prompt, **opts); acestep.edit
         self.lock = threading.RLock()
 
         choice = llm_choice(self.cfg, provider, model)
@@ -131,7 +174,10 @@ class MixSession:
             self.stems = align_stems(self.stems)
         self.analysis = analyze_all(self.stems)
         self.masking = masking_report(self.stems)
+        self.tempo_bpm = _tempo_of(self.stems)
         self.cleaned: dict[str, Stem] = {}
+        # cleaned stems at the plan's speed/key, the latest one per length (preview, full)
+        self._stretched: dict[str, tuple[tuple[float, int], dict[str, Stem]]] = {}
         self.versions: list[dict] = []
         self.turns: list[dict] = []          # the conversation, including replies that changed nothing
         self.pos = -1
@@ -153,13 +199,36 @@ class MixSession:
                 cache[s.name] = clean_stem(s, self.cfg)
         return cache
 
+    def _at_speed(self, stems: list[Stem], cleaned: dict[str, Stem], speed: float,
+                  semitones: int) -> dict[str, Stem]:
+        """The cleaned stems at the plan's tempo and key (stretch.stretch_stems, as the
+        splitter does it), kept until the next change: a fader move at 90% doesn't
+        stretch again. Voices keep their formants when the key moves."""
+        slot = "preview" if stems is self.stems else "full"
+        hit = self._stretched.get(slot)
+        if hit and hit[0] == (speed, semitones):
+            return hit[1]
+        roles = {s.name: s.role or "" for s in stems}
+        sr = stems[0].sr
+        out = stretch.stretch_stems({s.name: cleaned[s.name].audio for s in stems}, sr, speed,
+                                    semitones, "fine", formant=lambda n: roles[n].startswith("vocal"),
+                                    keep_loudness=True)
+        at = {n: cleaned[n].copy_with(a) for n, a in out.items()}
+        self._stretched[slot] = ((speed, semitones), at)
+        return at
+
     def render(self, plan: dict, stems: list[Stem] | None = None,
                cache: dict[str, Stem] | None = None) -> dict:
         """Mix and master `plan`. Returns the audio and its measurements."""
         stems = stems or self.stems
         cache = self._clean_all(stems, self.cleaned if cache is None else cache)
+        speed = float(plan["master"].get("speed", 1.0))
+        semitones = int(plan["master"].get("semitones", 0))
+        if speed != 1.0 or semitones:
+            cache = self._at_speed(stems, cache, speed, semitones)
         t0 = time.time()
-        bus, processed, mix_report = mixdown(stems, plan, self.cfg, verbose=False, cleaned=cache)
+        bpm = self.tempo_bpm * speed if self.tempo_bpm else None   # a synced echo follows the tempo
+        bus, processed, mix_report = mixdown(stems, plan, self.cfg, verbose=False, cleaned=cache, bpm=bpm)
         final, master_report = master(bus, plan, self.cfg, verbose=False, reference=self.reference)
         sr = self.cfg.get("sample_rate", 48_000)
         bus_lufs = integrated_lufs(bus.mean(axis=1), sr)
@@ -188,6 +257,9 @@ class MixSession:
             "parent": prev["n"] if prev else None, "time": time.time(),
             **(extra or {}),
         }
+        return self._push(v)
+
+    def _push(self, v: dict) -> dict:
         # nothing is ever dropped: a turn after an undo starts a branch from the
         # version being listened to (its "parent"), and undo walks back up parents
         self.versions.append(v)
@@ -196,7 +268,7 @@ class MixSession:
         return v
 
     _TURN_KEYS = ("n", "message", "reply", "source", "model", "changes", "rejected",
-                  "not_understood", "llm_error", "render_s")
+                  "not_understood", "llm_error", "render_s", "kind", "base")
 
     def _log_turn(self, entry: dict) -> None:
         self.turns.append(json_safe({k: entry.get(k) for k in self._TURN_KEYS}))
@@ -240,37 +312,116 @@ class MixSession:
                                         else "rule-based advisor."), source,
                                      {"model": self._answered_by(source)})
 
+    def _plan_version(self) -> tuple[dict, str]:
+        """The version a mix change starts from, and a note when that isn't the one
+        being listened to: an AI edit has no plan of its own, so its base is used."""
+        cur = self.current or self.first_mix()
+        if cur.get("kind") != "ai":
+            return cur, ""
+        base = self.goto(cur["base"])
+        return base, f"(Mixed from v{base['n']}: the AI edit in v{cur['n']} is audio, so it isn't carried over.) "
+
     def chat(self, message: str) -> dict:
         """One turn. Returns the new version (or, when nothing changed, a reply-only
         entry that is not added to the history)."""
         with self.lock:
-            cur = self.current or self.first_mix()
+            cur, note = self._plan_version()
             turn = revise_plan(
                 message, cur["plan"], self.stems, self.cfg, history=self.lineage(),
                 output_analysis=cur["output"], stem_levels=cur["levels"],
                 stem_analysis=self.analysis, use_llm=self.use_llm, provider=self.provider,
-                model=self.model, llm=self.llm,
+                model=self.model, llm=self.llm, tempo_bpm=self.tempo_bpm,
             )
             extra = {"rejected": turn["rejected"], "not_understood": turn["not_understood"],
                      "llm_error": turn.get("llm_error"), "model": self._answered_by(turn["source"])}
+            note += _without_stretch(turn, cur["plan"])
             if not turn["changes"]:
-                reply_only = {"n": None, "message": message, "reply": turn["reply"],
+                reply_only = {"n": None, "message": message, "reply": note + turn["reply"],
                               "source": turn["source"], "changes": [], **extra}
                 self._log_turn(reply_only)
                 return reply_only
-            return self._add_version(turn["plan"], message, turn["reply"], turn["source"], extra)
+            return self._add_version(turn["plan"], message, note + turn["reply"], turn["source"], extra)
 
     def set_params(self, adjustments: list[dict], label: str = "manual edit") -> dict | None:
         """Direct edits (faders, mute) through the same validated path as chat."""
         with self.lock:
-            cur = self.current or self.first_mix()
+            cur, note = self._plan_version()
             plan, rejected = apply_adjustments(cur["plan"], self.stems, adjustments, self.cfg)
             plan["source"] = "manual"
             changes = diff_plans(cur["plan"], plan)
             if not changes:
                 return None
-            reply = "Set: " + "; ".join(c["text"] for c in changes) + "."
+            reply = note + "Set: " + "; ".join(c["text"] for c in changes) + "."
             return self._add_version(plan, label, reply, "manual", {"rejected": rejected})
+
+    def ai_edit(self, prompt: str, mode: str = "repaint", start_s: float = 0.0,
+                end_s: float | None = None, strength: float | None = None,
+                seed: int | None = None) -> dict:
+        """Have ACE-Step change the audio of the version being listened to.
+
+        "repaint" rewrites start_s..end_s (seconds into this version's audio, to
+        the end when end_s is None) and keeps every other sample; "cover"
+        re-styles all of it, `strength` 0..1 (higher stays closer). The new
+        version is a child of this one and keeps its plan as `base`. What the
+        model adds goes through the master's limiter at the plan's ceiling,
+        since it never went through the master chain."""
+        prompt = prompt.strip()
+        if not prompt:
+            raise ValueError("an AI edit needs a prompt")
+        if mode not in acestep.MODES:
+            raise ValueError(f"mode is one of {', '.join(acestep.MODES)}")
+        if strength is not None and not 0.0 <= strength <= 1.0:
+            raise ValueError("strength is between 0 and 1")
+        with self.lock:
+            cur = self.current or self.first_mix()
+            sr = self.cfg.get("sample_rate", 48_000)
+            src, src_sr = read_audio(cur["wav"])
+            src = to_sample_rate(src, src_sr, sr)
+            length = len(src) / sr
+            if mode == "repaint":
+                end = length if end_s is None else min(float(end_s), length)
+                if not 0.0 <= start_s < end:
+                    raise ValueError(f"the range has to fall inside 0-{length:.1f} s and not be empty")
+            editor = self.editor or acestep.edit
+            opts = {"mode": mode, "seed": seed}
+            opts.update({"start_s": start_s, "end_s": end_s} if mode == "repaint" else {"strength": strength})
+            gen, gen_sr, info = editor(cur["wav"], prompt, **opts)
+            gen = to_sample_rate(np.asarray(gen, dtype=np.float32), gen_sr, sr)
+            m = self.cfg["master"]
+
+            def limited(x: np.ndarray) -> np.ndarray:
+                return limit(x, ceiling_db=cur["plan"]["master"].get("ceiling_db", -1.0),
+                             lookahead_ms=m["limiter_lookahead_ms"], release_ms=m["limiter_release_ms"],
+                             sr=sr, true_peak=m.get("true_peak", True))
+
+            if mode == "repaint":
+                audio = acestep.splice(src, gen, sr, start_s, end_s, finish=limited)
+                what = f"repainted {_clock(start_s)}-{_clock(end)}"
+            else:
+                audio = gen if gen.ndim == 2 else np.stack([gen, gen], axis=1)
+                lift = integrated_lufs(src.mean(axis=1), sr) - integrated_lufs(audio.mean(axis=1), sr)
+                if np.isfinite(lift):                   # as loud as what it re-styled
+                    audio = audio * 10 ** (lift / 20)
+                audio = limited(audio)
+                what = "re-styled the whole clip" + (f" (strength {strength:g})" if strength is not None else "")
+            n = len(self.versions) + 1
+            wav = self.out_dir / f"mix_v{n}.wav"
+            write_audio(str(wav), audio, sr)
+            base = cur.get("base", cur["n"])
+            model = info.get("dit_model") or "ACE-Step"
+            reply = (f"ACE-Step {what} of v{cur['n']} ({model}, {info.get('seconds', 0):.0f} s). "
+                     f"It's audio, not a mix plan: a mix change from here starts again from v{base}.")
+            return self._push({
+                "n": n, "message": prompt, "reply": reply, "source": "ai:acestep", "kind": "ai",
+                "base": base, "model": model,
+                "edit": {"mode": mode, "start_s": start_s if mode == "repaint" else None,
+                         "end_s": end if mode == "repaint" else None, "strength": strength,
+                         "seed": info.get("seed")},
+                "changes": [{"target": "audio", "param": mode, "text": f"AI: {what}"}],
+                "plan": cur["plan"], "output": analyze_master(audio, sr), "levels": None,
+                "master_report": None, "wav": str(wav), "render_s": info.get("seconds"),
+                "parent": cur["n"], "time": time.time(),
+            })
 
     def undo(self) -> dict | None:
         """Back to the version this one was made from."""
@@ -311,10 +462,14 @@ class MixSession:
         raise KeyError(f"no version {n}")
 
     def export(self, path: str, bit_depth: int = 24, full: bool = True) -> str:
-        """Write the current plan to `path`, over the whole song unless `full=False`."""
+        """Write the current plan to `path`, over the whole song unless `full=False`.
+        An AI edit is written as it is: it is the length of the audio it was made from."""
         with self.lock:
             cur = self.current or self.first_mix()
-            if full and self.preview:
+            if cur.get("kind") == "ai":                 # audio only: written as it is
+                audio, sr = read_audio(cur["wav"])
+                audio = to_sample_rate(audio, sr, self.cfg.get("sample_rate", 48_000))
+            elif full and self.preview:
                 stems = align_stems(self._full) if self.align else self._full
                 plan = validate_plan(cur["plan"], stems, self.cfg)
                 if not hasattr(self, "_full_cleaned"):
@@ -335,11 +490,13 @@ class MixSession:
         if v is None:
             return {}
         out = {k: v.get(k) for k in ("n", "message", "reply", "source", "model", "changes", "levels",
-                                     "render_s", "parent", "rejected", "not_understood", "llm_error")}
+                                     "render_s", "parent", "rejected", "not_understood", "llm_error",
+                                     "kind", "base", "edit")}
         o = v.get("output") or {}
         out["output"] = {k: o.get(k) for k in ("lufs", "true_peak_db", "crest_db", "lr_correlation")}
         out["stems"] = {n: {k: e.get(k) for k in ("role", "gain_db", "fader_db", "pan", "mute", "sends")}
                         for n, e in v["plan"]["stems"].items()} if "plan" in v else None
-        out["master"] = {k: v["plan"]["master"].get(k) for k in ("target_lufs", "ceiling_db")} \
+        out["master"] = {k: v["plan"]["master"].get(k)
+                         for k in ("target_lufs", "ceiling_db", "speed", "semitones")} \
             if "plan" in v else None
         return json_safe(out)

@@ -4,13 +4,9 @@
 // helpers
 // =========================================================================
 
-// $, el, api, jsonBody, store: common.js
+// $, el, api, jsonBody, store: common.js; fmtTime, labelOf, displayOf, lyricCell,
+// sheetRows, findAt, followWord, followChord: sheet.js (shared with the splitter)
 
-const fmtTime = (t) => {
-  const m = Math.floor(t / 60);
-  return `${m}:${(t - m * 60).toFixed(1).padStart(4, "0")}`;
-};
-const RTL = /[֐-ࣿיִ-﷿ﹰ-﻿]/;
 
 // =========================================================================
 // chord parsing + audition synth
@@ -211,17 +207,6 @@ const S = {
 const audio = $("#audio");
 
 // concert-pitch label (what the recording plays)
-function labelOf(c) {
-  if (c.custom) return c.custom;
-  const cands = c.candidates || [];
-  return cands.length ? cands[Math.min(c.selected || 0, cands.length - 1)].label : "N.C.";
-}
-
-// label as shown: after transpose and capo
-function displayOf(c) {
-  return c.display ?? labelOf(c);
-}
-
 function chordInfoOf(c) {
   if (c.custom) return parseChord(c.custom);
   const cand = c.candidates[c.selected || 0];
@@ -248,35 +233,6 @@ function makeChip(id, { carry = false } = {}) {
   return chip;
 }
 
-// One lyric word with its chips. A word the server split into syllables (w.syl)
-// puts each chip over its own syllable; `mk(id)` makes a chip, `carry` is a
-// "still sounding" chip for the line's first word. Returns {node, timing}: the cell
-// to insert and the node that is highlighted while the word is sung.
-function lyricCell(w, src, mk, carry) {
-  const approx = src.approx ? " approx" : "";
-  const barCls = w.bar != null ? " barline" : "";
-  const barTitle = w.bar != null ? `Bar ${w.bar + 1}` : null;
-  if (!w.syl) {
-    const chips = w.chords.map(mk);
-    if (carry) chips.unshift(carry);
-    const word = el("span", { class: "word" + approx, title: fmtTime(w.start) }, w.text);
-    word.addEventListener("click", () => seekPlay(w.start));
-    return { node: el("span", { class: "cell" + barCls, title: barTitle }, el("span", { class: "chords" }, chips), word), timing: word };
-  }
-  const groups = w.syl.map(() => []);
-  w.chords.forEach((id) => groups[w.at[id] ?? 0].push(mk(id)));
-  if (carry) groups[0].unshift(carry);
-  const parts = w.syl.map((sp, k) => {
-    const end = k + 1 < w.syl.length ? w.syl[k + 1].c : undefined;
-    const part = el("span", { class: "word part" + approx, title: `${fmtTime(sp.start)} · syllable ${k + 1}` }, w.text.slice(sp.c, end));
-    part.addEventListener("click", () => seekPlay(sp.start));
-    return el("span", { class: "cell syl" + (k === 0 ? barCls : ""), title: k === 0 ? barTitle : null },
-      el("span", { class: "chords" }, groups[k]), part);
-  });
-  const group = el("span", { class: "wordgroup", title: fmtTime(w.start) }, parts);
-  return { node: group, timing: group };
-}
-
 // has the user changed the meter away from what was detected?
 function meterIsManual(song) {
   const det = song.meter?.detected;
@@ -289,7 +245,7 @@ function meterIsManual(song) {
 function renderSong() {
   const song = S.song;
   S.chords = new Map(song.chords.map((c) => [c.id, c]));
-  S.timeline = song.chords.filter((c) => labelOf(c) !== "N.C.").sort((a, b) => a.start - b.start);
+  S.timeline = chordTimeline(song);
   S.chipNodes = new Map();
   S.words = [];
   S.activeChord = S.activeWord = null;
@@ -333,9 +289,9 @@ function renderSong() {
       "From ", el("a", { href: src.page_url, target: "_blank", rel: "noopener noreferrer" }, src.site),
       src.note ? ` · ${src.note}` : "");
   }
-  $("#export-cho").href = `/api/songs/${song.id}/export?fmt=cho`;
-  $("#export-txt").href = `/api/songs/${song.id}/export?fmt=txt`;
-  $("#export-harp").href = `/api/songs/${song.id}/export?fmt=harp`;
+  $("#export-cho").href = apiUrl(`/api/songs/${song.id}/export?fmt=cho`);
+  $("#export-txt").href = apiUrl(`/api/songs/${song.id}/export?fmt=txt`);
+  $("#export-harp").href = apiUrl(`/api/songs/${song.id}/export?fmt=harp`);
   $("#tab-guitar").href = `#/song/${song.id}`;
   $("#tab-harmonica").href = `#/song/${song.id}/harmonica`;
   $("#polish-btn").disabled = !song.lines.length;
@@ -343,44 +299,11 @@ function renderSong() {
   renderArrangement();
   const sheet = $("#sheet");
   sheet.classList.toggle("show-bars", $("#show-bars").checked);
-  const allText = song.lines.map((l) => l.words.map((w) => w.text).join(" ")).join(" ");
-  sheet.dir = RTL.test(allText) ? "rtl" : "ltr";
-
-  const rows = song.rows.map((row) => {
-    if (row.type === "instrumental") {
-      const items = [el("span", { class: "tag" }, "instr.")];
-      if (row.bars) {
-        items.push(el("span", { class: "bars" }, row.bars.map((bar) => {
-          const parts = [];
-          if (bar.chords.length) {
-            if (bar.hold) parts.push(makeChip(bar.hold, { carry: true }));
-            bar.chords.forEach((id) => parts.push(makeChip(id)));
-          } else {
-            parts.push(el("span", { class: "repeat", title: bar.hold ? `${displayOf(S.chords.get(bar.hold))} continues` : "no chord" },
-              bar.hold ? "%" : "–"));
-          }
-          return el("span", { class: "barcell", title: `Bar ${bar.bar + 1}` }, parts);
-        })));
-      } else {
-        row.chords.forEach((id, i) => {
-          if (i) items.push(el("span", { class: "sep" }, "|"));
-          items.push(makeChip(id));
-        });
-      }
-      return el("div", { class: "line instrumental" }, items);
-    }
-    const cells = row.words.map((w, i) => {
-      const src = song.lines[row.line].words[w.i];
-      const carry = i === 0 && row.carry ? makeChip(row.carry, { carry: true }) : null;
-      const { node, timing } = lyricCell(w, src, (id) => makeChip(id), carry);
-      S.words.push({ start: w.start, end: w.end, node: timing });
-      return node;
-    });
-    return el("div", { class: "line" + (row.gap_before ? " stanza" : "") }, cells);
-  });
+  sheet.dir = sheetDir(song);
+  const { rows, words } = sheetRows(song, (id, opts) => makeChip(id, opts), seekPlay);
+  S.words = words;
   if (!rows.length) rows.push(el("p", { class: "muted" }, "No chords detected."));
   sheet.replaceChildren(...rows);
-  S.words.sort((a, b) => a.start - b.start);
   renderHarmonica();
 }
 
@@ -430,7 +353,7 @@ async function openSong(id, tab = "guitar") {
   }
   renderSong();
   setTab(tab);
-  const src = `/api/songs/${id}/audio`;
+  const src = apiUrl(`/api/songs/${id}/audio`);
   if (S.song.audio && audio.dataset.src !== src) {
     audio.src = src;
     audio.dataset.src = src;
@@ -446,47 +369,14 @@ function seekPlay(t) {
 
 // ---- playback follow -----------------------------------------------------
 
-function findAt(list, t) {
-  let lo = 0, hi = list.length - 1, ans = -1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (list[mid].start <= t) { ans = mid; lo = mid + 1; } else hi = mid - 1;
-  }
-  return ans;
-}
-
-// highlight the word being sung (and scroll to it when following playback)
-function followWord(words, t, holder) {
-  const wi = findAt(words, t);
-  const w = wi >= 0 && t <= words[wi].end + 0.3 ? words[wi] : null;
-  if (w !== holder.activeWord) {
-    holder.activeWord?.node.classList.remove("active");
-    w?.node.classList.add("active");
-    holder.activeWord = w;
-    if (w && $("#follow").checked && !audio.paused) {
-      const r = w.node.getBoundingClientRect();
-      if (r.top < 80 || r.bottom > window.innerHeight - 140) {
-        w.node.scrollIntoView({ block: "center", behavior: "smooth" });
-      }
-    }
-  }
-}
-
 function tick() {
   if (!S.song) return;
   const t = audio.currentTime;
   if (S.tab === "harmonica") { harpTick(t); return; }
-  const ci = findAt(S.timeline, t);
-  const cur = ci >= 0 && t < S.timeline[ci].end ? S.timeline[ci] : null;
-  if (cur?.id !== S.activeChord) {
-    (S.chipNodes.get(S.activeChord) || []).forEach((n) => n.classList.remove("active"));
-    (S.chipNodes.get(cur?.id) || []).forEach((n) => n.classList.add("active"));
-    S.activeChord = cur?.id ?? null;
-    $("#now-chord").textContent = cur ? displayOf(cur) : "–";
-  }
-  const next = S.timeline[ci + 1];
+  const { cur, next } = followChord(S.timeline, S.chipNodes, t, S);
+  $("#now-chord").textContent = cur ? displayOf(cur) : "–";
   $("#next-chord").textContent = next ? `${displayOf(next)} in ${Math.max(0, next.start - t).toFixed(1)}s` : "–";
-  followWord(S.words, t, S);
+  followWord(S.words, t, S, $("#follow").checked && !audio.paused);
 }
 
 function loop() {

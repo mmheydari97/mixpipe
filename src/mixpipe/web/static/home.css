@@ -1,0 +1,13 @@
+/* Home page of the hub (mixpipe.cli ui); common.css loads first. */
+
+.tool-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin-top: 20px; }
+.tool { display: flex; gap: 14px; align-items: flex-start; color: var(--text); text-decoration: none;
+  transition: border-color .15s, transform .15s; }
+.tool:hover, .tool:focus-visible { border-color: var(--accent); transform: translateY(-1px); outline: none; }
+@media (prefers-reduced-motion: reduce) { .tool { transition: none; } .tool:hover { transform: none; } }
+.tool-icon { flex: none; width: 44px; height: 44px; }
+.tool-icon rect:first-child { fill: var(--accent); }
+.tool-icon g, .tool-icon text { fill: #fff; }
+.tool-text { display: grid; gap: 4px; }
+.tool-text b { font-size: 1.05rem; }
+.tool-status { color: var(--muted); min-height: 1.2em; }

@@ -1,8 +1,10 @@
-"""Speed and key changes with Rubber Band, done on the server.
+"""Speed and key changes with Rubber Band: the one place MixPipe calls it.
 
-The browser can change speed by itself (playbackRate + preservesPitch), but
-its quick time-stretch smears and warbles away from 100%, and it can't change
-the key at all. Rubber Band does both much more cleanly. In order of preference:
+Used by the splitter (speed/key versions and downloads), the mixer (tempo and
+key from the chat) and tsm.pitch_shift. The browser can change speed by itself
+(playbackRate + preservesPitch), but its quick time-stretch smears and warbles
+away from 100%, and it can't change the key at all. Rubber Band does both much
+more cleanly. In order of preference:
 
 - the `rubberband` command-line tool (installed with Homebrew's ffmpeg):
   "fast" uses its R2 engine (~4 s for six 4-minute stems), "fine" its R3
@@ -18,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable
@@ -61,16 +64,21 @@ def _ffmpeg_filters() -> frozenset[str]:
     return frozenset(line.split()[1] for line in out.stdout.splitlines() if len(line.split()) > 1)
 
 
+def has_rubberband() -> bool:
+    """The rubberband tool itself (both engines, formant preservation)."""
+    return shutil.which("rubberband") is not None
+
+
 def qualities() -> tuple[str, ...]:
     """The passes a version gets, quickest first ("fast" is skipped when only
     one engine is available)."""
-    if shutil.which("rubberband"):
+    if has_rubberband():
         return ("fast", "fine")
     return ("fine",) if shutil.which("ffmpeg") else ()
 
 
-def check_available(semitones: int) -> None:
-    if shutil.which("rubberband") or "rubberband" in _ffmpeg_filters():
+def check_available(semitones: float) -> None:
+    if has_rubberband() or "rubberband" in _ffmpeg_filters():
         return
     if semitones:
         raise StretchError("changing the key needs Rubber Band: brew install rubberband")
@@ -78,13 +86,13 @@ def check_available(semitones: int) -> None:
         raise StretchError("changing speed needs ffmpeg: brew install ffmpeg")
 
 
-def _command(src: Path, dst: Path, speed: float, semitones: int, quality: str,
+def _command(src: Path, dst: Path, speed: float, semitones: float, quality: str,
              formant: bool) -> list[str]:
     rubberband = shutil.which("rubberband")
     if rubberband:
         # no -q: its stderr carries the progress (see _watch_progress)
         cmd = [rubberband, "-3" if quality == "fine" else "-2", "--centre-focus",
-               "--tempo", str(speed), "--pitch", str(semitones)]
+               "--tempo", str(speed), "--pitch", f"{semitones:g}"]
         return cmd + (["--formant"] if formant else []) + [str(src), str(dst)]
     check_available(semitones)
     if "rubberband" in _ffmpeg_filters():
@@ -118,14 +126,15 @@ def _watch_progress(stream, quality: str, progress: Callable[[float], None] | No
                 tail[:] = (tail + [line.decode(errors="replace").strip()])[-5:]
 
 
-def stretch(audio: np.ndarray, sr: int, speed: float, semitones: int = 0,
+def stretch(audio: np.ndarray, sr: int, speed: float, semitones: float = 0,
             quality: str = "fine", formant: bool = False,
             cancelled: Callable[[], bool] | None = None,
             progress: Callable[[float], None] | None = None) -> np.ndarray:
-    """audio (frames x channels, float) at `speed` and moved by `semitones`.
+    """audio (frames x channels, float) at `speed` and moved by `semitones`
+    (fractions of a semitone are fine here; check() is for what a person picks).
 
     The result is exactly len(audio) / speed frames long, so stems stay the
-    same length (and in sync). It isn't clipped: Rubber Band can overshoot 1.0
+    same length (and in sync), and always 2-D. It isn't clipped: Rubber Band can overshoot 1.0
     a little. `formant=True` keeps a voice's character when the key moves.
     `cancelled()` is polled while Rubber Band runs; when it turns true the
     process is killed and Cancelled is raised. `progress(fraction)` is called
@@ -163,3 +172,46 @@ def stretch(audio: np.ndarray, sr: int, speed: float, semitones: int = 0,
     if len(out) < n:
         out = np.pad(out, ((0, n - len(out)), (0, 0)))
     return out[:n]
+
+
+def stretch_stems(stems: dict[str, np.ndarray], sr: int, speed: float, semitones: float = 0,
+                  quality: str = "fine", formant: Callable[[str], bool] = lambda name: False,
+                  cancelled: Callable[[], bool] | None = None,
+                  progress: Callable[[float], None] | None = None,
+                  keep_loudness: bool = False) -> dict[str, np.ndarray]:
+    """Every stem through stretch(), in parallel (one Rubber Band process each).
+
+    Each comes back len/speed frames long in its input's shape (a mono stem
+    stays 1-D). `formant(name)` picks the stems that keep their formants when
+    the key moves: the voices. `progress(fraction)` gets the average.
+    `keep_loudness` turns each result back to its input's loudness: R3 softens
+    sharp attacks, which can take a plucked part 1-2 dB down, and a mix's
+    balance shouldn't move because its tempo did."""
+    if not stems:
+        return {}
+    done = dict.fromkeys(stems, 0.0)
+
+    def report(name: str) -> Callable[[float], None]:
+        def update(frac: float) -> None:
+            done[name] = frac
+            if progress:
+                progress(sum(done.values()) / len(done))
+        return update
+
+    def one(name: str) -> tuple[str, np.ndarray]:
+        y = np.asarray(stems[name], dtype=np.float32)
+        z = stretch(y if y.ndim == 2 else y[:, None], sr, speed, semitones, quality,
+                    formant=bool(semitones) and formant(name), cancelled=cancelled,
+                    progress=report(name))
+        z = z[:, 0] if y.ndim == 1 else z
+        if keep_loudness:
+            from .analysis import integrated_lufs
+
+            mono = lambda a: a.mean(axis=1) if a.ndim == 2 else a  # noqa: E731
+            lift = integrated_lufs(mono(y), sr) - integrated_lufs(mono(z), sr)
+            if np.isfinite(lift):
+                z = z * np.float32(10 ** (lift / 20))
+        return name, z
+
+    with ThreadPoolExecutor(len(stems), thread_name_prefix="stretch") as pool:
+        return dict(pool.map(one, stems))

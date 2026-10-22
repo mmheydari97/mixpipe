@@ -16,22 +16,21 @@ matter for music:
 `time_warp` takes any monotone map from output time to source time, which is
 what onset quantization needs; `stretch` and `pitch_shift` are uniform special
 cases. The Rubber Band binary is used for `pitch_shift` when it is installed
-and `engine="auto"`, because it sounds better; the vocoder is the fallback and
-the dependency-free default for everything else.
+and `engine="auto"`, because it sounds better (through stretch.py, the one place
+MixPipe calls it); the vocoder is the fallback and the dependency-free default
+for everything else.
 """
 
 from __future__ import annotations
 
-import shutil
-import subprocess
-import tempfile
 from fractions import Fraction
-from pathlib import Path
 
 import numpy as np
 from scipy.signal import resample_poly
 
 from . import SAMPLE_RATE
+from .stretch import has_rubberband as have_rubberband
+from .stretch import stretch as rubberband_stretch
 
 N_FFT = 2048
 HOP = 512          # synthesis hop: 75 % overlap
@@ -156,30 +155,6 @@ def stretch(audio: np.ndarray, rate: float, **kw) -> np.ndarray:
     return time_warp(audio, positions, n_out=n_out, **kw)
 
 
-def _rubberband(audio: np.ndarray, sr: int, semitones: float, formant: bool) -> np.ndarray:
-    import soundfile as sf
-
-    with tempfile.TemporaryDirectory(prefix="mixpipe-rb-") as tmp:
-        src, dst = Path(tmp) / "in.wav", Path(tmp) / "out.wav"
-        a = np.asarray(audio, dtype=np.float32)
-        # float in -> float out: pitch-shifted material can overshoot full scale
-        sf.write(str(src), a, sr, subtype="FLOAT")
-        cmd = [shutil.which("rubberband"), "-3", "--pitch", f"{semitones:.4f}"]
-        cmd += (["--formant"] if formant else []) + [str(src), str(dst)]
-        proc = subprocess.run(cmd, capture_output=True)
-        if proc.returncode != 0 or not dst.exists():
-            raise RuntimeError(f"rubberband failed: {proc.stderr.decode(errors='replace')[-200:]}")
-        out, _ = sf.read(str(dst), dtype="float32", always_2d=a.ndim == 2)
-    n = a.shape[0]
-    if out.shape[0] < n:
-        out = np.pad(out, [(0, n - out.shape[0])] + [(0, 0)] * (out.ndim - 1))
-    return out[:n]
-
-
-def have_rubberband() -> bool:
-    return shutil.which("rubberband") is not None
-
-
 def pitch_shift(
     audio: np.ndarray, semitones: float, sr: int = SAMPLE_RATE,
     engine: str = "auto", formant: bool = False,
@@ -198,7 +173,10 @@ def pitch_shift(
     if engine == "rubberband" or (engine == "auto" and have_rubberband()):
         if not have_rubberband():
             raise RuntimeError("engine 'rubberband' needs: brew install rubberband")
-        return _rubberband(audio, sr, semitones, formant)
+        a = np.asarray(audio, dtype=np.float32)
+        out = rubberband_stretch(a if a.ndim == 2 else a[:, None], sr, 1.0, semitones, "fine",
+                                 formant=formant)
+        return out[:, 0] if a.ndim == 1 else out
 
     ratio = 2.0 ** (semitones / 12.0)
     n = np.asarray(audio).shape[0]

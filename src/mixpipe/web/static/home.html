@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MixPipe</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23b4441f'/%3E%3Cg fill='white'%3E%3Crect x='7' y='9' width='3' height='15' rx='1.5'/%3E%3Crect x='14.5' y='6' width='3' height='18' rx='1.5'/%3E%3Crect x='22' y='12' width='3' height='12' rx='1.5'/%3E%3C/g%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/common.css">
+  <link rel="stylesheet" href="/static/home.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">mixpipe</a>
+  </header>
+
+  <main>
+    <h1>What are you working on?</h1>
+    <p class="muted">Three tools, one library: a song you split is ready to mix, and the splitter can
+      pull in the chord finder's chords and lyrics.</p>
+
+    <div class="tool-grid">
+      <a class="card tool" href="/chords/">
+        <svg class="tool-icon" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7"/><text x="16" y="22" font-family="Menlo,monospace" font-size="15" font-weight="700" text-anchor="middle">Am</text></svg>
+        <span class="tool-text">
+          <b>Chord finder</b>
+          <span class="muted">Chords, lyrics and a harmonica tab for any song or link.</span>
+          <small id="status-chords" class="tool-status"></small>
+        </span>
+      </a>
+      <a class="card tool" href="/splitter/">
+        <svg class="tool-icon" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7"/><g><rect x="7" y="9" width="3" height="15" rx="1.5"/><rect x="14.5" y="6" width="3" height="18" rx="1.5"/><rect x="22" y="12" width="3" height="12" rx="1.5"/></g></svg>
+        <span class="tool-text">
+          <b>Splitter</b>
+          <span class="muted">Six stems to practise with: mute, slow down, change key, loop.</span>
+          <small id="status-splitter" class="tool-status"></small>
+        </span>
+      </a>
+      <a class="card tool" href="/mixer/">
+        <svg class="tool-icon" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7"/><g><rect x="7" y="6" width="3" height="20" rx="1.5"/><rect x="14.5" y="6" width="3" height="20" rx="1.5"/><rect x="22" y="6" width="3" height="20" rx="1.5"/><rect x="5" y="16" width="7" height="3" rx="1.5"/><rect x="12.5" y="10" width="7" height="3" rx="1.5"/><rect x="20" y="19" width="7" height="3" rx="1.5"/></g></svg>
+        <span class="tool-text">
+          <b>Mixer</b>
+          <span class="muted">Mix stems by talking to them, or rewrite parts with local AI edits.</span>
+          <small id="status-mixer" class="tool-status"></small>
+        </span>
+      </a>
+    </div>
+  </main>
+
+  <script src="/static/common.js"></script>
+  <script src="/static/home.js"></script>
+</body>
+</html>
