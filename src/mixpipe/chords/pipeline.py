@@ -8,6 +8,7 @@ Each song lives in out/chords/<song_id>/ (folder layout and ids: songstore.py):
   mix.flac         playback audio, only when the inputs can't be served as-is
   separated/       Demucs stems (mono FLAC), cached
   transcript.json  cached, keyed by backend/model/language
+  revision.json    the LLM's whole-lyric revision (optional), keyed by model + transcript text
   chords.json      cached, keyed by RECOGNIZER_VERSION
   melody.json      cached melody notes for the harmonica tab, keyed by MELODY_VERSION
   sheet.json       the editable result (see sheet.py)
@@ -47,6 +48,7 @@ DEFAULT_OPTIONS = {
     "retime": True,       # fix estimated word times (OpenRouter text) with a local pass
     "key_changes": "normal",  # "normal" (~8+ bar modulations) | "sensitive" (3-4 bars)
     "recognizer": "template",  # "template" | "neural" (adds the BTC model's opinion)
+    "revise_model": None, # OpenRouter chat model that revises the whole lyric (None = skip)
 }
 
 # --------------------------------------------------------------------------- #
@@ -118,6 +120,7 @@ def analyze(
     melody_extractor: Callable | None = None,
     retimer: Callable | None = None,
     neural_provider: Callable | None = None,
+    reviser: Callable | None = None,
 ) -> dict:
     """Run every stage for one song and write sheet.json. Returns the sheet.
 
@@ -126,7 +129,8 @@ def analyze(
     `downloader(source, dest_dir, progress=cb) -> Path` and
     `melody_extractor(vocal, sr, regions, fallback=, key=, progress=) -> {"notes"}`
     `retimer(transcript, vocal, sr) -> transcript` and
-    `neural_provider(mix, sr, progress) -> {"probs", "frame_s"}`
+    `neural_provider(mix, sr, progress) -> {"probs", "frame_s"}` and
+    `reviser(messages, model=, max_tokens=) -> str` (the lyric revision's chat call)
     can be injected (tests use fakes so no models or songs are downloaded).
     """
     from .recognize import recognize
@@ -184,6 +188,11 @@ def analyze(
                 report("transcribe", 1.0, f"{sum(len(ln) for ln in transcript['lines'])} words")
     else:
         report("transcribe", 1.0, "skipped (instrumental)")
+    lines = [{"words": ln, "gap_before": False} for ln in transcript["lines"]]
+    revision = None
+    if opts.get("revise_model") and lines:
+        lines, revision = _revise(song_dir, lines, opts["revise_model"], meta.get("title"),
+                                  transcript.get("language") or opts["language"], reviser, report)
 
     # ---- chords ---------------------------------------------------------------
     chords_path = song_dir / "chords.json"
@@ -244,9 +253,10 @@ def analyze(
         "transpose": 0,
         "capo": 0,
         "recognizer": chords.get("recognizer", "template"),
-        "transcript": {k: transcript.get(k)
-                       for k in ("backend", "model", "language", "timing", "retimed")},
-        "lines": [{"words": ln, "gap_before": False} for ln in transcript["lines"]],
+        "transcript": {**{k: transcript.get(k)
+                          for k in ("backend", "model", "language", "timing", "retimed")},
+                       "revised": revision},
+        "lines": lines,
         "chords": chords["segments"],
         "melody": {"notes": melody["notes"], "octave": 0},
     }
@@ -259,6 +269,28 @@ def analyze(
     save_sheet(sheet, song_dir / "sheet.json")
     report("align", 1.0, "done")
     return sheet
+
+
+def _revise(song_dir: Path, lines: list[dict], model: str, title: str | None,
+            language: str | None, chat: Callable | None, report) -> tuple[list[dict], dict]:
+    """The LLM revision of the whole lyric, cached in revision.json. Never raises:
+    a failed request keeps the transcript as heard. Returns (lines, summary)."""
+    from .revise import revise_lines
+
+    cache = song_dir / "revision.json"
+    cached = json.loads(cache.read_text()) if cache.exists() else None
+    report("transcribe", 0.95, f"revising the lyrics with {model}")
+    try:
+        new, info = revise_lines(lines, model, title, language, chat=chat, cached=cached)
+    except Exception as exc:  # noqa: BLE001
+        report("transcribe", 1.0, f"lyric revision failed ({type(exc).__name__}: {exc}); "
+                                  "keeping the lyrics as heard")
+        return lines, {"model": model, "applied": False, "changed": 0,
+                       "reason": f"{type(exc).__name__}: {exc}"}
+    _write_json(cache, info)
+    report("transcribe", 1.0, f"{model} revised {info['changed']} words" if info["applied"]
+           else f"lyrics kept as heard: {info['reason']}")
+    return new, {k: info[k] for k in ("model", "applied", "changed", "reason")}
 
 
 def _btc_probs(mix: np.ndarray, sr: int, progress) -> dict:

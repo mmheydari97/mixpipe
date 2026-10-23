@@ -58,6 +58,17 @@
             <small id="stt-key-warning" class="warn" hidden>OPENROUTER_API_KEY isn't set on the server. Set it and restart <code>chords-ui</code>.</small>
           </div>
 
+          <label class="check" title="After transcription, an OpenRouter chat model reads the whole lyric (with the song's title) and fixes lines that came out as sound-alike nonsense, and choruses heard differently each time. Only the text is sent. Word timing is kept. If the model rewrites the song instead of correcting it, the lyrics are kept as heard.">
+            <input id="revise" type="checkbox">
+            Revise the lyrics with an LLM: read the whole song and fix misheard lines
+          </label>
+
+          <div class="field" id="revise-model-field" hidden>
+            <span>Revision model (chat)</span>
+            <div id="revise-picker"></div>
+            <small id="revise-key-warning" class="warn" hidden>OPENROUTER_API_KEY isn't set on the server. Set it and restart <code>chords-ui</code>.</small>
+          </div>
+
           <label class="field" title="The standard recognizer matches chroma against chord templates. The neural option also asks BTC, a trained transformer (downloads a 12 MB model the first time) and combines both; it needs torch, which Demucs installs.">
             <span>Chord recognition</span>
             <select id="recognizer">
@@ -101,7 +112,6 @@
         <p id="song-source" class="source" hidden></p>
         <div class="toolbar">
           <button id="edit-btn">Edit lyrics</button>
-          <button id="polish-btn">Polish lyrics…</button>
           <label class="check small"><input id="follow" type="checkbox" checked> Follow playback</label>
           <span class="spacer"></span>
           <a id="export-cho" class="button" download>ChordPro</a>
@@ -173,6 +183,8 @@
           their timing, and chords stay at their times, so they'll re-land on the right words.</p>
         <textarea id="editor-text" spellcheck="false" rows="16"></textarea>
         <div class="actions">
+          <button id="revise-btn" title="An LLM reads the whole lyric in the editor and suggests fixes for misheard lines. You review them first.">Revise with LLM…</button>
+          <span class="spacer"></span>
           <button id="editor-cancel">Cancel</button>
           <button id="editor-save" class="primary">Save lyrics</button>
         </div>
@@ -185,6 +197,16 @@
           <span class="legend" id="harp-legend" aria-label="Legend"><b>3↑</b> blow · <b>3↓</b> draw · <b>●</b> button in</span>
           <span id="harp-meta" class="meta"></span>
           <span class="spacer"></span>
+          <label class="check small" title="Main notes carry the tune: hold each one until the next, or play the passing notes in between for nuance.">
+            Main note every
+            <select id="main-mode" aria-label="Main note density">
+              <option value="beat">beat</option>
+              <option value="strong">strong beat</option>
+            </select></label>
+          <label class="check small" title="Hide the passing notes: hold each main note until the next one.">
+            <input id="main-only" type="checkbox"> Main notes only</label>
+          <label class="check small" title="A line of harmonica chords: the neighbouring holes to play together for each chord of the song.">
+            <input id="harp-chords" type="checkbox" checked> Chords</label>
           <label class="check small" title="Keep grace notes and quick runs (down to ~60 ms). May add a few false notes.">
             <input id="fast-notes" type="checkbox"> Fast notes</label>
           <button id="add-note-btn" title="Add a note the tracker missed, at the playhead">+ Note</button>
@@ -208,18 +230,20 @@
   <!-- chord candidate menu (one, repositioned per chip) -->
   <div id="chord-menu" class="chord-menu" hidden role="menu"></div>
 
-  <dialog id="polish-dialog">
-    <form method="dialog" class="dialog-body" id="polish-form">
-      <h2>Polish lyrics with an LLM</h2>
-      <p class="muted">Sends only the lyric <em>text</em> to the model to fix misheard words.
-        You review the changes before anything is saved. Type <b>free</b> to put free models first.</p>
+  <dialog id="revise-dialog">
+    <form method="dialog" class="dialog-body" id="revise-form">
+      <h2>Revise lyrics with an LLM</h2>
+      <p class="muted">The model reads the <em>whole</em> lyric in the editor, with the song's title, and fixes
+        lines that were misheard, making repeated choruses match. Only the text is sent. You review the changes,
+        and they go into the editor; nothing is saved until you press <b>Save lyrics</b>.
+        Type <b>free</b> to put free models first.</p>
       <div id="chat-picker"></div>
       <small id="chat-key-warning" class="warn" hidden>OPENROUTER_API_KEY isn't set on the server.</small>
-      <div id="polish-result"></div>
+      <div id="revise-result"></div>
       <div class="actions">
         <button value="cancel" formnovalidate>Close</button>
-        <button id="polish-run" type="button">Suggest fixes</button>
-        <button id="polish-accept" type="button" class="primary" hidden>Accept changes</button>
+        <button id="revise-run" type="button">Suggest fixes</button>
+        <button id="revise-accept" type="button" class="primary" hidden>Put in the editor</button>
       </div>
     </form>
   </dialog>

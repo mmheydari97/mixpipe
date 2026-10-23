@@ -54,6 +54,56 @@ def parse_label(label: str) -> tuple[int, str, int | None] | None:
     return root, m.group(3), bass
 
 
+# suffix -> intervals above the root, root first (the chord recogniser's templates)
+CHORD_TONES: dict[str, tuple[int, ...]] = {
+    "": (0, 4, 7),
+    "m": (0, 3, 7),
+    "7": (0, 4, 7, 10),
+    "maj7": (0, 4, 7, 11),
+    "m7": (0, 3, 7, 10),
+    "sus2": (0, 2, 7),
+    "sus4": (0, 5, 7),
+    "dim": (0, 3, 6),
+    "aug": (0, 4, 8),
+}
+_EXTRA_TONES = {"m7b5": (0, 3, 6, 10), "ø": (0, 3, 6, 10), "dim7": (0, 3, 6, 9),
+                "6": (0, 4, 7, 9), "m6": (0, 3, 7, 9), "9": (0, 4, 7, 10, 2),
+                "add9": (0, 4, 7, 2), "m9": (0, 3, 7, 10, 2), "maj9": (0, 4, 7, 11, 2),
+                "5": (0, 7), "+": (0, 4, 8)}
+
+
+def chord_intervals(quality: str) -> tuple[int, ...]:
+    """Intervals above the root for a chord suffix, root first. Typed suffixes
+    outside the table fall back to the nearest triad ("m11" -> minor)."""
+    q = quality.strip()
+    if q in CHORD_TONES:
+        return CHORD_TONES[q]
+    if q in _EXTRA_TONES:
+        return _EXTRA_TONES[q]
+    if q.startswith(("dim", "°")):
+        return CHORD_TONES["dim"]
+    if q.startswith("aug"):
+        return CHORD_TONES["aug"]
+    if q.startswith("sus"):
+        return CHORD_TONES["sus2" if q.startswith("sus2") else "sus4"]
+    if q.startswith(("m", "-")) and not q.startswith("maj"):
+        return CHORD_TONES["m"]
+    return CHORD_TONES[""]
+
+
+def chord_pcs(label: str) -> tuple[int, ...] | None:
+    """"Am7" -> (9, 0, 4, 7): the chord's pitch classes, root first (a slash bass
+    is added last). None for anything that isn't a chord name."""
+    parsed = parse_label(label)
+    if parsed is None:
+        return None
+    root, quality, bass = parsed
+    pcs = list(dict.fromkeys((root + iv) % 12 for iv in chord_intervals(quality)))
+    if bass is not None and bass not in pcs:
+        pcs.append(bass)
+    return tuple(pcs)
+
+
 def transpose_label(label: str, shift: int, names: list[str]) -> str:
     """Move a chord label by `shift` semitones, spelled with `names`.
     Labels that don't parse (N.C., free text) come back unchanged."""

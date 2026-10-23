@@ -19,9 +19,11 @@ from pydantic import BaseModel
 from ..chords import pipeline
 from ..chords.align import lines_to_text, reanchor, word_diff
 from ..chords.harmonica import (add_note, merge_notes, note_from_display, set_fingering,
-                                split_note, to_harp_text)
+                                set_main, split_note, to_harp_text)
+from ..chords.revise import revise_text
 from ..chords.sheet import (apply_settings, custom_from_display, load_sheet, save_sheet,
                             to_chordpro, to_text, view)
+from ..openrouter import valid_model_id
 from .common import SongService, add_openrouter_routes, add_page, add_song_routes, as_bool
 
 # Python's mimetypes guesses e.g. audio/mp4a-latm for .m4a, which Safari won't play
@@ -31,16 +33,6 @@ AUDIO_TYPES = {
     ".webm": "audio/webm",
 }
 
-POLISH_PROMPT = """\
-You correct speech-recognition errors in song lyrics. The user message is a \
-machine transcript of a sung vocal, one lyric line per row.
-
-Fix misheard words, spelling and obvious punctuation. Keep the original language \
-and wording wherever it is plausible. Keep exactly the same number of lines in \
-the same order. Do not add, remove, merge or translate lines. Do not add titles, \
-section labels, notes or commentary. Return only the corrected lyrics."""
-
-
 def parse_options(fields: dict) -> dict:
     """The analysis options sent with an upload or a link."""
     stt = fields.get("stt") or "mlx"
@@ -49,11 +41,15 @@ def parse_options(fields: dict) -> dict:
         raise HTTPException(400, "stt must be mlx or openrouter")
     if stt == "openrouter" and not stt_model:
         raise HTTPException(400, "pick an OpenRouter transcription model")
+    revise_model = fields.get("revise_model") or None
+    if revise_model is not None and not valid_model_id(str(revise_model)):
+        raise HTTPException(400, "that isn't an OpenRouter model id")
     return {"language": str(fields.get("language") or "auto"), "stt": stt,
             "stt_model": stt_model, "separate": as_bool(fields.get("separate"), True),
             "retime": as_bool(fields.get("retime"), True),
             "key_changes": "sensitive" if fields.get("key_changes") == "sensitive" else "normal",
-            "recognizer": "neural" if fields.get("recognizer") == "neural" else "template"}
+            "recognizer": "neural" if fields.get("recognizer") == "neural" else "template",
+            "revise_model": revise_model}
 
 
 class LyricsIn(BaseModel):
@@ -70,6 +66,8 @@ class NoteIn(BaseModel):
     custom: str | None = None
     fingering: int | None = None
     auto_fingering: bool = False
+    main: bool | None = None          # pin as a main (True) or passing (False) note
+    auto_main: bool = False
 
 
 class NoteEdit(BaseModel):
@@ -86,8 +84,9 @@ class MelodyIn(BaseModel):
     fast: bool = False               # keep grace notes and quick runs
 
 
-class PolishIn(BaseModel):
+class ReviseIn(BaseModel):
     model: str
+    text: str | None = None          # the editor's text; default the saved lyrics
 
 
 class SettingsIn(BaseModel):
@@ -128,17 +127,18 @@ def create_app(
     melody_extractor=None,
     retimer=None,
     neural_provider=None,
+    reviser=None,
     workers: int = 1,
 ) -> FastAPI:
     """Build the app. `separator`/`transcriber`/`resolver`/`downloader`/
-    `melody_extractor`/`retimer` are injectable for tests, and `run_inline` runs analysis
+    `melody_extractor`/`retimer`/`reviser` (the lyric revision's chat call) are injectable for tests, and `run_inline` runs analysis
     synchronously instead of in the worker thread."""
     root = Path(root)
     app = FastAPI(title="mixpipe chords")
     sheet_lock = threading.Lock()
     svc = chords_service(root, run_inline, workers, separator=separator, transcriber=transcriber,
                          downloader=downloader, melody_extractor=melody_extractor,
-                         retimer=retimer, neural_provider=neural_provider)
+                         retimer=retimer, neural_provider=neural_provider, reviser=reviser)
     app.state.songs = svc            # the hub hands it to the splitter, so both use one queue
     song_dir, sheet_path = svc.song_dir, svc.result_path
     add_song_routes(app, svc, parse_options, resolver=resolver)
@@ -201,6 +201,10 @@ def create_app(
                     set_fingering(note, None, sheet)
                 elif body.fingering is not None:
                     set_fingering(note, body.fingering, sheet)
+                if body.auto_main:
+                    set_main(note, None)
+                elif body.main is not None:
+                    set_main(note, body.main)
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from exc
             save_sheet(sheet, p)
@@ -275,25 +279,22 @@ def create_app(
         return PlainTextResponse(body, headers={
             "Content-Disposition": f'attachment; filename="{song_id}.{ext}"'})
 
-    @app.post("/api/songs/{song_id}/polish")
-    def polish(song_id: str, body: PolishIn):
+    @app.post("/api/songs/{song_id}/revise")
+    def revise(song_id: str, body: ReviseIn):
+        """Suggest a whole-lyric revision (nothing is saved): {old, text, diff}."""
         from .. import openrouter
 
-        if openrouter.api_key() is None:
+        if reviser is None and openrouter.api_key() is None:
             raise HTTPException(400, "OPENROUTER_API_KEY is not set on the server")
         sheet = load_sheet(sheet_path(song_id))
-        old = lines_to_text(sheet["lines"])
+        old = body.text if body.text is not None else lines_to_text(sheet["lines"])
         if not old.strip():
-            raise HTTPException(400, "no lyrics to polish")
+            raise HTTPException(400, "no lyrics to revise")
         try:
-            new = openrouter.chat(
-                [{"role": "system", "content": POLISH_PROMPT},
-                 {"role": "user", "content": old}],
-                model=body.model, max_tokens=4000,
-            )
+            new = revise_text(old, body.model, sheet.get("title"),
+                              (sheet.get("transcript") or {}).get("language"), chat=reviser)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(502, f"{type(exc).__name__}: {exc}") from exc
-        new = new.strip().strip("`").strip()
         return {"old": old, "text": new, "diff": word_diff(old, new)}
 
     # ---- OpenRouter catalogue ---------------------------------------------------

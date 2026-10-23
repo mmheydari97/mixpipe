@@ -99,7 +99,7 @@ const { stageLabel, pollStatus } = createJobUI(
 // library view
 // =========================================================================
 
-const lib = { picker: null, sttPicker: null, hasKey: null };
+const lib = { picker: null, sttPicker: null, revisePicker: null, hasKey: null };
 
 function onSourceChange(picker) {
   $("#analyze-btn").disabled = !picker.hasInput();
@@ -130,12 +130,32 @@ async function onSttChange() {
   }
 }
 
+// the whole-lyric LLM revision after transcription (optional)
+async function onReviseChange() {
+  const on = $("#revise").checked;
+  store.set("mixpipe.revise", on ? "1" : "0");
+  $("#revise-model-field").hidden = !on;
+  if (on) {
+    if (!lib.revisePicker) {
+      lib.revisePicker = createModelPicker($("#revise-picker"), "chat", {
+        placeholder: "Search chat models (try: free, gemini, claude)…", initialQuery: "free",
+      });
+    }
+    $("#revise-key-warning").hidden = await orStatus();
+  }
+}
+
 async function analyze(rerun = false) {
   const picker = lib.picker;
   if (!picker.hasInput()) return;
   const stt = sttChoice();
   if (stt === "openrouter" && !lib.sttPicker?.value) {
     $("#upload-progress").replaceChildren(el("div", { class: "msg error" }, "Pick an OpenRouter model first."));
+    return;
+  }
+  const revise = $("#revise").checked;
+  if (revise && !lib.revisePicker?.value) {
+    $("#upload-progress").replaceChildren(el("div", { class: "msg error" }, "Pick a model for the lyric revision first."));
     return;
   }
   const link = picker.link;
@@ -146,6 +166,7 @@ async function analyze(rerun = false) {
     separate: $("#separate").checked,
     key_changes: $("#key-changes").value,
     recognizer: $("#recognizer").value,
+    revise_model: revise ? lib.revisePicker.value : null,
     rerun,
   });
 
@@ -181,6 +202,9 @@ function initLibrary() {
     onSubmit: () => analyze(false),
   });
   document.querySelectorAll("input[name=stt]").forEach((r) => r.addEventListener("change", onSttChange));
+  $("#revise").checked = store.get("mixpipe.revise") === "1";
+  $("#revise").addEventListener("change", onReviseChange);
+  onReviseChange();
   const savedLang = store.get("mixpipe.language");
   if (savedLang) $("#language").value = savedLang;
   $("#language").addEventListener("change", (e) => store.set("mixpipe.language", e.target.value));
@@ -278,6 +302,13 @@ function renderSong() {
   } else {
     meta.push(el("span", { class: "badge" }, "instrumental"));
   }
+  const rev = t.revised;
+  if (rev?.applied) {
+    meta.push(el("span", { class: "badge", title: `${rev.model} read the whole lyric and fixed misheard lines. Edit lyrics to change them back.` },
+      `lyrics revised · ${rev.changed} word${rev.changed === 1 ? "" : "s"}`));
+  } else if (rev) {
+    meta.push(el("span", { class: "badge", title: `Revision by ${rev.model} not applied: ${rev.reason}` }, "lyrics as heard"));
+  }
   if (t.timing === "approx") meta.push(el("span", { class: "badge err", title: "This model didn't return word timestamps; positions are estimated." }, "word timing approximate"));
   if (t.timing === "aligned") meta.push(el("span", { class: "badge", title: "The model returned no word timestamps; word times come from a local Whisper pass matched to its text." }, "word timing aligned locally"));
   if (t.timing === "snapped") meta.push(el("span", { class: "badge", title: "The model returned no word timestamps; word starts were moved onto the nearest sung onsets in the vocal." }, "word timing snapped to the vocal"));
@@ -294,7 +325,6 @@ function renderSong() {
   $("#export-harp").href = apiUrl(`/api/songs/${song.id}/export?fmt=harp`);
   $("#tab-guitar").href = `#/song/${song.id}`;
   $("#tab-harmonica").href = `#/song/${song.id}/harmonica`;
-  $("#polish-btn").disabled = !song.lines.length;
 
   renderArrangement();
   const sheet = $("#sheet");
@@ -583,30 +613,32 @@ function initSongView() {
     } finally { btn.disabled = false; }
   });
 
-  // polish dialog
+  // revise dialog: an LLM suggests fixes to the editor's text
   let chatPicker = null;
   let proposal = null;
-  $("#polish-btn").addEventListener("click", async () => {
-    const dlg = $("#polish-dialog");
+  $("#revise-btn").addEventListener("click", async () => {
+    const dlg = $("#revise-dialog");
     if (!chatPicker) {
       chatPicker = createModelPicker($("#chat-picker"), "chat", {
         placeholder: "Search chat models (try: free, gemini, llama)…", initialQuery: "free",
       });
     }
     proposal = null;
-    $("#polish-result").replaceChildren();
-    $("#polish-accept").hidden = true;
+    $("#revise-result").replaceChildren();
+    $("#revise-accept").hidden = true;
     $("#chat-key-warning").hidden = await orStatus();
     dlg.showModal();
   });
-  $("#polish-run").addEventListener("click", async () => {
-    const box = $("#polish-result");
+  $("#revise-run").addEventListener("click", async () => {
+    const box = $("#revise-result");
     if (!chatPicker?.value) { box.replaceChildren(el("div", { class: "msg error" }, "Pick a model first.")); return; }
-    const btn = $("#polish-run");
+    if (!$("#editor-text").value.trim()) { box.replaceChildren(el("div", { class: "msg error" }, "The editor has no lyrics to revise.")); return; }
+    const btn = $("#revise-run");
     btn.disabled = true;
     box.replaceChildren(el("div", { class: "msg" }, `Asking ${chatPicker.value}…`));
     try {
-      const res = await api(`/api/songs/${S.song.id}/polish`, jsonBody("POST", { model: chatPicker.value }));
+      const res = await api(`/api/songs/${S.song.id}/revise`,
+        jsonBody("POST", { model: chatPicker.value, text: $("#editor-text").value }));
       proposal = res.text;
       const changed = res.diff.some(([op]) => op !== "equal");
       const parts = res.diff.map(([op, text]) => {
@@ -616,15 +648,16 @@ function initSongView() {
       });
       box.replaceChildren(changed ? el("div", { class: "diff", dir: $("#sheet").dir }, parts)
         : el("div", { class: "msg" }, "No changes suggested."));
-      $("#polish-accept").hidden = !changed;
+      $("#revise-accept").hidden = !changed;
     } catch (e) {
       box.replaceChildren(el("div", { class: "msg error" }, e.message));
     } finally { btn.disabled = false; }
   });
-  $("#polish-accept").addEventListener("click", async () => {
+  $("#revise-accept").addEventListener("click", () => {
     if (proposal == null) return;
-    await saveLyrics(proposal);
-    $("#polish-dialog").close();
+    $("#editor-text").value = proposal;
+    $("#revise-dialog").close();
+    $("#editor-text").focus();
   });
 }
 

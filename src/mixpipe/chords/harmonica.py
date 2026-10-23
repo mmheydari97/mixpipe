@@ -29,6 +29,11 @@ Without a manual choice the tab picks the fingering with no bend and no button
 when it can, then the hole nearest the previous note.
 
 Tab notation: "3↑" blow, "3↓" draw, "●" button in ("3↓●"), primes for bends.
+A chord is a run of neighbouring holes played together: "1-3↑" blows holes 1 to 3.
+
+Main notes: one note per beat (and one per strong beat) carries the tune; the
+rest are passing notes. Holding each main note until the next one plays a
+simpler version of the melody (see main_levels).
 
 Melody notes are stored at sung (concert) pitch in sheet["melody"]; the
 song's transpose setting and an octave shift (automatic fit + the user's
@@ -40,12 +45,13 @@ register) get their own automatic fit, plus the same user offset.
 from __future__ import annotations
 
 import bisect
+import math
 import re
 from dataclasses import dataclass
 
-from .align import build_rows, chord_label, grid_for
+from .align import BarGrid, _visible, build_rows, chord_label, grid_for
 from .syllables import make_syllabifier
-from .theory import NEUTRAL, key_names, key_label, note_pc, parse_key
+from .theory import NEUTRAL, chord_pcs, key_label, key_names, note_pc, parse_key, transpose_label
 
 HOLES = 12
 LOWEST = 60            # C4, hole 1 blow
@@ -54,6 +60,7 @@ DRAW = (2, 5, 9, 11)
 REST = "rest"          # a note's custom label when the user removed it
 MAX_OCTAVE = 3
 NOTES_PER_ROW = 12     # notes per instrumental row when there are no bars
+CHORD_HOLES = (2, 3, 4)  # widths of the hole runs tried for a chord
 
 _NOTE = re.compile(r"^\s*([A-Ga-g])([#b♯♭]?)\s*(-?\d)?\s*$")
 _NATURAL = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
@@ -88,6 +95,11 @@ def tab_text(hole: int, breath: str, button: bool, bend: int = 0) -> str:
             f"{BEND_MARKS.get(bend, '′' * bend) if bend else ''}{'●' if button else ''}")
 
 
+def tab_range(first: int, last: int, breath: str, button: bool) -> str:
+    """"1-3↑": holes 1 to 3 together; "5-6↓●" with the button in."""
+    return f"{first}-{last}{'↑' if breath == 'blow' else '↓'}{'●' if button else ''}"
+
+
 class Instrument:
     """One harmonica: kind + key, and every way to sound each pitch on it."""
 
@@ -107,6 +119,7 @@ class Instrument:
             found.sort(key=lambda f: (f["bend"], f["button"], f["hole"], f["breath"]))
         self.lowest = min(self._by_midi)
         self.highest = max(self._by_midi)
+        self._windows: list[dict] | None = None
 
     # ---- layout ----
     def _build(self) -> list[dict]:
@@ -152,6 +165,28 @@ class Instrument:
 
     def playable(self, midi: int | None) -> bool:
         return midi is not None and midi in self._by_midi
+
+    def chord_windows(self) -> list[dict]:
+        """Every run of 2-4 neighbouring holes played together with one breath
+        (and the button in or out), unbent:
+        [{"first", "last", "breath", "button", "midis"}], lowest hole first."""
+        if self._windows is None:
+            reeds: dict[tuple[str, bool], dict[int, int]] = {}
+            for p in self.positions:
+                if not p["bend"]:
+                    reeds.setdefault((p["breath"], p["button"]), {})[p["hole"]] = p["midi"]
+            out = []
+            for (breath, button), holes in reeds.items():
+                for first in sorted(holes):
+                    for width in CHORD_HOLES:
+                        run = [holes.get(h) for h in range(first, first + width)]
+                        if None in run:
+                            break
+                        out.append({"first": first, "last": first + width - 1, "breath": breath,
+                                    "button": button, "midis": run})
+            out.sort(key=lambda w: (w["first"], w["button"], w["breath"], w["last"]))
+            self._windows = out
+        return self._windows
 
     def to_dict(self) -> dict:
         return {"type": self.kind, "key": HARP_KEYS[self.pc]}
@@ -337,6 +372,12 @@ def set_fingering(note: dict, index: int | None, sheet: dict) -> None:
     note["fingering"] = index
 
 
+def set_main(note: dict, value: bool | None) -> None:
+    """Pin a note as a main note (True: held, on the strong beats too) or a
+    passing note (False); None lets the tab decide."""
+    note["main"] = None if value is None else bool(value)
+
+
 # --------------------------------------------------------------------------- #
 # editing the note list
 # --------------------------------------------------------------------------- #
@@ -375,7 +416,7 @@ def split_note(sheet: dict, note_id: str, at: float | None = None) -> str:
         raise ValueError(f"a note can only be split inside itself, leaving at least "
                          f"{MIN_NOTE_S * 1000:.0f} ms on each side")
     second = {**{k: (list(v) if isinstance(v, list) else v) for k, v in note.items()},
-              "id": _new_id(notes), "start": round(at, 3), "fingering": None}
+              "id": _new_id(notes), "start": round(at, 3), "fingering": None, "main": None}
     second["candidates"] = [dict(c) for c in note.get("candidates", [])]
     note["end"] = round(at, 3)
     note["fingering"] = None
@@ -399,7 +440,7 @@ def merge_notes(sheet: dict, note_ids: list[str]) -> str:
     keeper = max(chosen, key=lambda n: n["end"] - n["start"])
     first = chosen[0]
     merged = {**{k: v for k, v in keeper.items()}, "id": first["id"],
-              "start": first["start"], "end": chosen[-1]["end"], "fingering": None}
+              "start": first["start"], "end": chosen[-1]["end"], "fingering": None, "main": None}
     drop = {n["id"] for n in chosen}
     mel = _melody(sheet)
     mel["notes"] = [n for n in mel["notes"] if n["id"] not in drop] + [merged]
@@ -431,7 +472,7 @@ def add_note(sheet: dict, start: float, end: float, text: str) -> str:
     if label == REST or parsed is None or parsed[1] is None:
         raise ValueError(f"{text!r} isn't a note name (try C, F#, Bb4)")
     note = {"id": _new_id(notes), "start": start, "end": end, "selected": 0, "custom": None,
-            "fingering": None, "source": "user",
+            "fingering": None, "main": None, "source": "user",
             "candidates": [{"label": label, "midi": parsed[0], "conf": 1.0}]}
     notes.append(note)
     notes.sort(key=lambda n: n["start"])
@@ -497,13 +538,195 @@ def _key_at(sheet: dict):
     return at
 
 
+# --------------------------------------------------------------------------- #
+# main notes: the ones to hold
+# --------------------------------------------------------------------------- #
+
+ON_BEAT = 1.25         # score bonus for a note that starts on the beat
+CHORD_TONE = 1.3       # ... and for a pitch of the chord sounding then
+LEVELS = {"beat": 1, "strong": 2}
+
+
+def strong_beats(beats_per_bar: int) -> set[int]:
+    """Positions in a bar (0 = downbeat) that count as strong: 1 and 3 in 4/4,
+    the dotted beats in 6/8 and 9/8, 1 and 3 of four in 12/8, else the downbeat."""
+    if beats_per_bar == 4:
+        return {0, 2}
+    if beats_per_bar in (6, 9):
+        return set(range(0, beats_per_bar, 3))
+    if beats_per_bar == 12:
+        return {0, 6}
+    return {0}
+
+
+def _chord_tones_at(sheet: dict):
+    """t -> pitch classes of the chord sounding at t (concert pitch), or set()."""
+    chords = _visible(sheet.get("chords", []))
+    starts = [c["start"] for c in chords]
+    tones = [set(chord_pcs(chord_label(c)) or ()) for c in chords]
+
+    def at(t: float) -> set[int]:
+        i = bisect.bisect_right(starts, t + 0.05) - 1
+        return tones[i] if i >= 0 and t < chords[i]["end"] else set()
+    return at
+
+
+def _winners(notes: list[dict], windows: list[tuple[float, float]], tol: float, tones_at) -> set[str]:
+    """Ids of the notes that win at least one window [a, b): the most time
+    inside it, more for starting on its beat and for being a chord tone."""
+    won, lo = set(), 0
+    for a, b in windows:
+        while lo < len(notes) and notes[lo]["end"] <= a:
+            lo += 1
+        best, best_score = None, 0.0
+        for n in notes[lo:]:
+            if n["start"] >= b:
+                break
+            overlap = min(n["end"], b) - max(n["start"], a)
+            if overlap <= 0:
+                continue
+            score = (overlap * (ON_BEAT if abs(n["start"] - a) <= tol else 1.0)
+                     * (CHORD_TONE if n["sung"] % 12 in tones_at(max(n["start"], a)) else 1.0))
+            if score > best_score + 1e-9:
+                best, best_score = n, score
+        if best is not None:
+            won.add(best["id"])
+    return won
+
+
+def main_levels(notes: list[dict], sheet: dict) -> dict[str, dict]:
+    """Which melody notes carry the tune, for the notes that sound (each needs
+    "sung"): {id: {"level", "hold"}}.
+
+    Each beat's main note is the one that fills most of it, with a bonus for
+    starting on the beat and for being a tone of the chord: level 1. The same
+    contest over strong beat to strong beat (see strong_beats), among the level-1
+    notes, gives level 2. Everything else is a passing note (level 0).
+    A note's own "main" (True / False) pins it to level 2 / 0.
+
+    "hold" = {"beat": t, "strong": t} for main notes of that level: how long to
+    hold it when skipping the passing notes after it, i.e. until the next main
+    note, stopping early at a rest longer than about a beat. None for passing
+    notes. Sheets without beats count beats from the first note.
+    """
+    sounding = sorted((n for n in notes if n.get("sung") is not None), key=lambda n: n["start"])
+    if not sounding:
+        return {}
+    period = float(sheet.get("beat_period") or 0.5)
+    grid = grid_for(sheet) or BarGrid([sounding[0]["start"]], 4, 0, period)
+    first = grid.beat_index(sounding[0]["start"])
+    last = grid.beat_index(max(n["end"] for n in sounding)) + 1
+    beats = [(grid.beat_time(i), *grid.beat_in_bar(i)) for i in range(first, last + 1)]
+    beat_windows = [(a[0], b[0]) for a, b in zip(beats, beats[1:])]
+    strong = [t for t, pos, m in beats if pos in strong_beats(m)]
+    if not strong or strong[0] > beats[0][0]:
+        strong.insert(0, beats[0][0])     # the pickup before the first strong beat
+    if strong[-1] < beats[-1][0]:
+        strong.append(beats[-1][0])
+    strong_windows = list(zip(strong, strong[1:]))
+
+    tol = max(0.08, 0.25 * grid.period)
+    tones_at = _chord_tones_at(sheet)
+    free = [n for n in sounding if n.get("main") is not False]
+    pinned = {n["id"] for n in sounding if n.get("main") is True}
+    beat_won = _winners(free, beat_windows, tol, tones_at) | pinned
+    strong_won = _winners([n for n in free if n["id"] in beat_won], strong_windows, tol, tones_at) | pinned
+    level = {n["id"]: 2 if n["id"] in strong_won else 1 if n["id"] in beat_won else 0
+             for n in sounding}
+
+    gap = max(0.4, grid.period)          # a rest longer than this ends a hold
+    holds: dict[str, dict] = {n["id"]: {} for n in sounding}
+    for name, threshold in LEVELS.items():
+        mains = [i for i, n in enumerate(sounding) if level[n["id"]] >= threshold]
+        for k, i in enumerate(mains):
+            nxt = sounding[mains[k + 1]]["start"] if k + 1 < len(mains) else math.inf
+            end = sounding[i]["end"]
+            for n in sounding[i + 1:]:
+                if n["start"] >= nxt or n["start"] - end > gap:
+                    break
+                end = max(end, n["end"])
+            if nxt - end <= gap:
+                end = nxt
+            holds[sounding[i]["id"]][name] = round(min(end, nxt), 3)
+    return {n["id"]: {"level": level[n["id"]], "hold": holds[n["id"]] or None} for n in sounding}
+
+
+# --------------------------------------------------------------------------- #
+# chords: neighbouring holes together
+# --------------------------------------------------------------------------- #
+
+
+def harp_chords(sheet: dict, inst: Instrument, notes: list[dict]) -> list[dict]:
+    """The chord sheet's chords as harmonica chords, at played pitch.
+
+    For each chord, a run of neighbouring holes (one breath, no bends) where
+    every reed is a chord tone and at least two different notes sound. Best:
+    the most chord tones (root, then third first), no button, nearest the hole
+    of the melody note playing then (so it sits under your mouth), fewest holes.
+    "full" when root, third and fifth all sound, else it is a partial chord.
+    "tab" is None when no run fits. `notes` are the view's notes (for holes).
+    Items carry "custom" (the label) so build_rows can place them.
+    """
+    transpose = int(sheet.get("transpose", 0))
+    windows = inst.chord_windows()
+    timed = sorted((n for n in notes if n.get("fingering_index", -1) >= 0), key=lambda n: n["start"])
+    starts = [n["start"] for n in timed]
+
+    def melody_hole(t0: float, t1: float) -> int | None:
+        i = bisect.bisect_right(starts, t0 + 0.15) - 1
+        if i >= 0 and timed[i]["end"] > t0:
+            n = timed[i]
+        elif i + 1 < len(timed) and timed[i + 1]["start"] < t1:
+            n = timed[i + 1]
+        else:
+            return None
+        return n["fingerings"][n["fingering_index"]]["hole"]
+
+    out, ref = [], None
+    for c in _visible(sheet.get("chords", [])):
+        label = chord_label(c)
+        names = key_names(c.get("key") or sheet.get("key"), transpose)
+        display = pretty(transpose_label(label, transpose, names) if transpose else label)
+        item = {"id": f"h{c['id']}", "chord": c["id"], "start": c["start"], "end": c["end"],
+                "custom": display, "label": display, "tab": None, "holes": None, "breath": None,
+                "button": False, "midis": [], "notes": [], "full": False}
+        out.append(item)
+        pcs = chord_pcs(label)
+        if pcs is None:
+            continue
+        tones = [(p + transpose) % 12 for p in pcs]
+        ref = melody_hole(c["start"], c["end"]) or ref
+        best, best_key = None, None
+        for w in windows:
+            got = {m % 12 for m in w["midis"]}
+            if len(got) < 2 or not got <= set(tones):
+                continue
+            dist = 0 if ref is None else max(w["first"] - ref, ref - w["last"], 0)
+            key = (len(got), tones[0] in got, len(tones) > 1 and tones[1] in got,
+                   not w["button"], -dist, -len(w["midis"]))
+            if best_key is None or key > best_key:
+                best, best_key = w, key
+        if best is None:
+            continue
+        got = {m % 12 for m in best["midis"]}
+        item.update({"tab": tab_range(best["first"], best["last"], best["breath"], best["button"]),
+                     "holes": [best["first"], best["last"]], "breath": best["breath"],
+                     "button": best["button"], "midis": list(best["midis"]),
+                     "notes": [pretty(names[m % 12]) for m in best["midis"]],
+                     "full": all(t in got for t in tones[:3])})
+        ref = ref if ref is not None else (best["first"] + best["last"]) // 2
+    return out
+
+
 def harmonica_view(sheet: dict) -> dict | None:
     """The melody as shown on the harmonica tab, or None before it was found.
 
     Each note gains "midi" (played pitch, None for a rest), "sung" (pitch in
     the recording), "display" (note name), "name" (with octave), "fingerings", "fingering_index", "tab",
-    "in_range", "rest", and per-candidate "display" / "tab". "rows" places the
-    notes on the lyrics like the chord sheet does.
+    "in_range", "rest", "level" / "hold" (see main_levels), "main_pinned", and
+    per-candidate "display" / "tab". "chords" are the harmonica chords (see
+    harp_chords, ids "h<chord id>"). "rows" places the notes and those chords
+    on the lyrics like the chord sheet does.
     """
     mel = _melody(sheet)
     if mel is None:
@@ -547,9 +770,17 @@ def harmonica_view(sheet: dict) -> dict | None:
             playable += (n["end"] - n["start"]) if out["in_range"] else 0.0
         notes.append(out)
 
+    levels = main_levels(notes, sheet)
+    for out in notes:
+        info = levels.get(out["id"]) or {"level": 0, "hold": None}
+        out.update(info, main_pinned=out.get("main") is not None)
+    chords = harp_chords(sheet, inst, notes)
+
     return {
         "notes": notes,
-        "rows": build_rows(sheet.get("lines", []), notes, sheet.get("beat_period", 0.5),
+        "chords": chords,
+        # chords first: one that starts with a note sits over it
+        "rows": build_rows(sheet.get("lines", []), chords + notes, sheet.get("beat_period", 0.5),
                            grid=grid_for(sheet), chords_per_row=NOTES_PER_ROW,
                            syllabify=make_syllabifier(
                                (sheet.get("transcript") or {}).get("language"),
@@ -574,10 +805,16 @@ def harmonica_view(sheet: dict) -> dict | None:
 
 
 def _token(n: dict) -> tuple[str, str]:
-    """(name line, tab line) text for one note."""
+    """(name line, tab line) text for one note; a passing note in parentheses."""
     if n["rest"]:
         return "", ""
-    return n["display"], n["tab"] or "--"
+    name, tab = n["display"], n["tab"] or "--"
+    return (name, tab) if n.get("level") else (f"({name})", f"({tab})")
+
+
+def _chord_token(c: dict) -> str:
+    """"C 1-3↑", "Am 1-2↑~" (partial), "B♭ --" (no chord on this harp)."""
+    return f"{c['label']} {c['tab'] or '--'}{'' if c['full'] or not c['tab'] else '~'}"
 
 
 def to_harp_text(sheet: dict) -> str:
@@ -586,7 +823,8 @@ def to_harp_text(sheet: dict) -> str:
     inst = instrument_of(sheet)
     legend = ("↑ blow   ↓ draw   ′ ″ ‴ bend a half / whole / 1½ steps" if inst.kind == "diatonic10"
               else "↑ blow   ↓ draw   ● button in")
-    out = [sheet.get("title", "Untitled"), f"{inst.name} harmonica   {legend}"]
+    out = [sheet.get("title", "Untitled"), f"{inst.name} harmonica   {legend}",
+           "1-3↑ holes 1 to 3 together   ~ partial chord   (E) passing note: hold the one before it"]
     if hv is None:
         out += ["", "(no melody found yet)"]
         return "\n".join(out) + "\n"
@@ -606,11 +844,13 @@ def to_harp_text(sheet: dict) -> str:
     out.append("")
 
     notes = {n["id"]: n for n in hv["notes"]}
+    chords = {c["id"]: c for c in hv["chords"]}
     for row in hv["rows"]:
         if row["type"] == "instrumental":
             def cell(ids: list[str]) -> str:
-                toks = [_token(notes[i]) for i in ids if not notes[i]["rest"]]
-                return "  ".join(f"{a} {b}" for a, b in toks) or "-"
+                toks = [f"[{_chord_token(chords[i])}]" if i in chords else " ".join(_token(notes[i]))
+                        for i in ids if i in chords or not notes[i]["rest"]]
+                return "  ".join(toks) or "-"
             if "bars" in row:
                 out.append("| " + " | ".join(cell(b["chords"]) for b in row["bars"]) + " |")
             else:
@@ -618,15 +858,19 @@ def to_harp_text(sheet: dict) -> str:
             continue
         if row["gap_before"]:
             out.append("")
-        names, tabs, lyric = "", "", ""
+        harp, names, tabs, lyric = "", "", "", ""
         for w in row["words"]:
             if lyric:
                 lyric += " "
-            width = max(len(names), len(tabs))
+            width = max(len(harp), len(names), len(tabs))
             if width:  # the previous word's notes ran past it: start this word after them
                 lyric = lyric.ljust(width + 1)
             col = len(lyric)
             for cid in w["chords"]:
+                if cid in chords:
+                    at = max(col, len(harp) + 1) if harp else col
+                    harp = harp.ljust(at) + _chord_token(chords[cid])
+                    continue
                 a, b = _token(notes[cid])
                 if not a:
                     continue
@@ -634,6 +878,8 @@ def to_harp_text(sheet: dict) -> str:
                 tabs = tabs.ljust(col) + b
                 col += max(len(a), len(b)) + 1
             lyric += w["text"]
+        if harp.strip():
+            out.append(harp.rstrip())
         if names.strip():
             out.append(names.rstrip())
             out.append(tabs.rstrip())
