@@ -39,6 +39,19 @@
 .chip.note.rest { opacity: .4; min-width: 1.6em; }
 .chip.note.active { opacity: 1; }
 .harp .cell .chords { min-height: 2.6em; }
+.chip.note.main { box-shadow: inset 0 -2px 0 var(--chord); }
+.chip.note.passing { font-size: .74em; opacity: .62; }
+.chip.note.passing .nm { font-weight: 500; }
+.chip.note.passing.active { opacity: 1; }
+.harp.main-only .chip.note.passing { display: none; }
+.harp .hchords { display: flex; gap: 3px; }
+.chip.hchord { display: inline-flex; gap: .4ch; align-items: baseline; font-size: .74em; color: var(--muted);
+  border-color: var(--border); border-style: dashed; padding: 1px 4px; }
+.chip.hchord .lb { color: var(--chord); }
+.chip.hchord .tb { font-weight: 500; color: var(--text); }
+.chip.hchord.partial .tb { color: var(--muted); }
+.chip.hchord.none { opacity: .5; cursor: default; }
+.harp.no-hchords .chip.hchord, .harp.no-hchords .hchords { display: none; }
 .chord-menu .fingering-row button.link { font-family: inherit; }
 .chord-menu .pick .tab { margin-left: 10px; font-weight: 500; color: var(--text); }
 .chord-menu .pick .tab.oor { color: var(--danger); font-family: inherit; font-size: .8em; }
@@ -79,7 +92,8 @@
 .chord-menu .foot button { flex: 1; justify-content: center; font-size: .85em; }
 .chord-menu .hint { color: var(--muted); font-size: .8em; padding: 2px 6px; }
 
-/* ---------- polish dialog ---------- */
+/* ---------- revise dialog ---------- */
+#editor .actions .spacer { flex: 1; }
 dialog { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 0; width: min(720px, calc(100vw - 32px)); box-shadow: var(--shadow); }
 dialog::backdrop { background: rgb(0 0 0 / .35); }
 .dialog-body { padding: 20px; display: grid; gap: 10px; }

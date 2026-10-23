@@ -557,6 +557,14 @@ def test_api_note_editing_and_harmonica_settings(tmp_path, wav_bytes):
     assert again["harmonica"]["instrument"]["key"] == "G" and again["harmonica"]["fast"] is True
     assert seen == [False, True]
 
+    # pin a note as passing, then let the tab decide again
+    v = client.patch(f"/api/songs/{sid}/notes/n0", json={"main": False}).json()
+    n0 = next(n for n in v["harmonica"]["notes"] if n["id"] == "n0")
+    assert n0["level"] == 0 and n0["main_pinned"] and n0["hold"] is None
+    v = client.patch(f"/api/songs/{sid}/notes/n0", json={"auto_main": True}).json()
+    n0 = next(n for n in v["harmonica"]["notes"] if n["id"] == "n0")
+    assert n0["level"] >= 1 and not n0["main_pinned"]
+
 
 # --------------------------------------------------------------------------- #
 # melody extraction: polyphonic fallback, fast notes
@@ -617,3 +625,120 @@ def test_fast_mode_keeps_quick_notes():
     fast = extract_melody(y, SR, regions, key="C:maj", fast=True)["notes"]
     assert len(fast) > len(normal)
     assert len(fast) >= 4
+
+
+# --------------------------------------------------------------------------- #
+# main notes, harmonica chords
+# --------------------------------------------------------------------------- #
+
+from mixpipe.chords.harmonica import DEFAULT_INSTRUMENT, harp_chords, set_main  # noqa: E402
+from mixpipe.chords.theory import chord_pcs  # noqa: E402
+
+
+def C(cid, label, start, end):
+    return {"id": cid, "start": start, "end": end, "candidates": [{"label": label, "conf": 1.0}],
+            "selected": 0, "custom": None}
+
+
+@pytest.fixture
+def beat_sheet(harp_sheet):
+    """4/4 at 120 bpm from 1.0 s (a downbeat), over a C chord."""
+    harp_sheet["key"], harp_sheet["key_label"] = "C:maj", "C major"
+    harp_sheet["beat_times"] = [1.0 + 0.5 * i for i in range(9)]
+    harp_sheet["chords"] = [C("c0", "C", 1.0, 7.0)]
+    harp_sheet["melody"]["notes"] = [
+        N("n0", 72, 1.0, 1.9),    # C5 held over beats 1-2: main
+        N("n1", 74, 1.9, 2.0),    # D5 quick pickup: passing
+        N("n2", 76, 2.0, 2.45),   # E5 on beat 3 (strong)
+        N("n3", 77, 2.5, 2.6),    # F5 on beat 4, short: passing
+        N("n4", 79, 2.6, 2.95),   # G5 fills beat 4 and is a chord tone: main of the beat
+        N("n5", 84, 3.0, 3.4),    # C6 on the next downbeat
+        N("n6", 72, 6.0, 6.4),    # after a long rest
+    ]
+    return harp_sheet
+
+
+def levels(sheet):
+    hv = harmonica_view(sheet)
+    return {n["id"]: n["level"] for n in hv["notes"]}, {n["id"]: n["hold"] for n in hv["notes"]}
+
+
+def test_main_notes_per_beat_and_strong_beat(beat_sheet):
+    lv, hold = levels(beat_sheet)
+    assert lv == {"n0": 2, "n1": 0, "n2": 2, "n3": 0, "n4": 1, "n5": 2, "n6": 2}
+    # hold a main note until the next one of its level...
+    assert hold["n0"] == {"beat": 2.0, "strong": 2.0}
+    assert hold["n2"] == {"beat": 2.6, "strong": 3.0}
+    assert hold["n4"] == {"beat": 3.0}
+    assert hold["n1"] is None
+    # ...but not through a long rest
+    assert hold["n5"]["strong"] == 3.4
+
+
+def test_pinning_main_notes(beat_sheet):
+    notes = {n["id"]: n for n in beat_sheet["melody"]["notes"]}
+    set_main(notes["n3"], True)
+    set_main(notes["n0"], False)
+    lv, _ = levels(beat_sheet)
+    assert lv["n3"] == 2 and lv["n0"] == 0
+    assert lv["n1"] >= 1           # beat 2 goes to the next best note
+    set_main(notes["n0"], None)
+    assert levels(beat_sheet)[0]["n0"] == 2
+    # edits that make notes start them unpinned
+    assert notes["n0"]["main"] is None
+
+
+def test_chord_pcs():
+    assert chord_pcs("Am7") == (9, 0, 4, 7)
+    assert chord_pcs("C/G") == (0, 4, 7)
+    assert chord_pcs("C/Bb") == (0, 4, 7, 10)
+    assert chord_pcs("Fm11") == (5, 8, 0)
+    assert chord_pcs("Bbm7b5") == (10, 1, 4, 8)
+    assert chord_pcs("N.C.") is None
+
+
+def chords_on(labels, instrument=DEFAULT_INSTRUMENT, notes=()):
+    sheet = {"key": "C:maj", "transpose": 0,
+             "chords": [C(f"c{i}", lab, 2.0 * i, 2.0 * i + 2) for i, lab in enumerate(labels)]}
+    return {c["label"]: c for c in harp_chords(sheet, instrument, list(notes))}
+
+
+def test_harp_chords_on_c_chromatic():
+    got = chords_on(["C", "Am", "F", "Dm", "Db", "G7", "E"])
+    assert (got["C"]["tab"], got["C"]["full"], got["C"]["notes"]) == ("1-3↑", True, ["C", "E", "G"])
+    assert (got["Am"]["tab"], got["Am"]["full"], got["Am"]["notes"]) == ("1-2↑", False, ["C", "E"])
+    assert (got["F"]["tab"], got["F"]["full"]) == ("2-3↓", False)
+    assert (got["Dm"]["tab"], got["Dm"]["full"]) == ("1-3↓", True)
+    assert (got["D♭"]["tab"], got["D♭"]["full"], got["D♭"]["button"]) == ("1-3↑●", True, True)
+    assert got["G7"]["tab"] == "4-6↓" and got["G7"]["notes"] == ["B", "D", "F"]
+    assert got["E"]["tab"] is None                      # no two reeds of E major sit together
+    assert all(c["id"] == f"h{c['chord']}" for c in got.values())
+
+
+def test_harp_chord_sits_by_the_melody():
+    note = {"start": 0.0, "end": 1.5, "fingering_index": 0, "fingerings": [{"hole": 10}]}
+    assert chords_on(["C"], notes=[note])["C"]["tab"] == "9-11↑"
+
+
+def test_harp_chords_on_c_diatonic():
+    got = chords_on(["G", "C", "Dm"], get_instrument("diatonic10", "C"))
+    assert (got["G"]["tab"], got["G"]["full"]) == ("1-3↓", True)
+    assert (got["C"]["tab"], got["C"]["full"]) == ("1-3↑", True)
+    assert got["Dm"]["full"] and got["Dm"]["breath"] == "draw"
+
+
+def test_view_and_export_show_chords_and_passing_notes(beat_sheet):
+    beat_sheet["chords"] = [C("c0", "C", 1.0, 2.0), C("c1", "Am", 2.0, 7.0)]
+    beat_sheet["melody"]["octave"] = -1                # keep it near the lyric test's range
+    hv = harmonica_view(beat_sheet)
+    assert [c["id"] for c in hv["chords"]] == ["hc0", "hc1"]
+    lyric = next(r for r in hv["rows"] if r["type"] == "lyric")
+    placed = [i for w in lyric["words"] for i in w["chords"]]
+    assert "hc0" in placed and "hc1" in placed
+    text = to_harp_text(beat_sheet)
+    lines = text.splitlines()
+    i = next(k for k, ln in enumerate(lines) if ln.startswith("here "))
+    assert lines[i - 3].startswith("C 1-3↑ ") and "Am 1-2↑~" in lines[i - 3]
+    assert lines[i - 3].index("Am") == lines[i - 2].index("E")      # over the note it starts with
+    assert "(D)" in lines[i - 2]                       # the passing pickup
+    assert "passing note" in text and "holes 1 to 3 together" in text

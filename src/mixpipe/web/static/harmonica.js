@@ -6,7 +6,11 @@
 
 const H = {
   notes: new Map(),     // id -> note (from the server's harmonica view)
-  timeline: [],         // notes that sound, sorted by start
+  chords: new Map(),    // id -> harmonica chord ("h<chord id>")
+  timeline: [],         // notes that sound (main notes only, with mainOnly), sorted by start
+  mode: store.get("mixpipe.harpMain") === "strong" ? "strong" : "beat",  // main note per beat / strong beat
+  mainOnly: store.get("mixpipe.harpMainOnly") === "1",
+  showChords: store.get("mixpipe.harpChords") !== "0",
   words: [],            // [{start, end, node}] in the harmonica sheet
   chipNodes: new Map(), // note id -> [nodes]
   activeNote: null,
@@ -16,16 +20,17 @@ const H = {
 const harpJob = createJobUI(["decode", "melody"], { decode: "Decode", melody: "Melody" });
 
 // A reed-ish tone: detuned saw + square through a lowpass, with a soft attack.
+// `midi` is one note or a list (a chord: holes played together).
 synth.playNote = function (midi, duration) {
   this.stop();
+  const midis = [].concat(midi);
   const ctx = this.ensure();
   const out = ctx.createGain();
-  out.gain.value = 0.12;
+  out.gain.value = 0.12 / Math.sqrt(midis.length);
   const lp = ctx.createBiquadFilter();
   lp.type = "lowpass"; lp.frequency.value = 2200; lp.Q.value = 0.7;
   lp.connect(out); out.connect(ctx.destination);
   this.nodes.push(out, lp);
-  const hz = 440 * 2 ** ((midi - 69) / 12);
   const t0 = ctx.currentTime + 0.02;
   const t1 = t0 + Math.max(0.3, duration);
   const env = ctx.createGain();
@@ -35,19 +40,25 @@ synth.playNote = function (midi, duration) {
   env.gain.linearRampToValueAtTime(0, t1);
   env.connect(lp);
   this.nodes.push(env);
-  [["sawtooth", 1, 0.6], ["square", 1.003, 0.35]].forEach(([type, ratio, level]) => {
-    const osc = ctx.createOscillator();
-    osc.type = type;
-    osc.frequency.value = hz * ratio;
-    const g = ctx.createGain();
-    g.gain.value = level;
-    osc.connect(g); g.connect(env);
-    osc.start(t0); osc.stop(t1 + 0.02);
-    this.nodes.push(osc, g);
+  midis.forEach((m) => {
+    const hz = 440 * 2 ** ((m - 69) / 12);
+    [["sawtooth", 1, 0.6], ["square", 1.003, 0.35]].forEach(([type, ratio, level]) => {
+      const osc = ctx.createOscillator();
+      osc.type = type;
+      osc.frequency.value = hz * ratio;
+      const g = ctx.createGain();
+      g.gain.value = level;
+      osc.connect(g); g.connect(env);
+      osc.start(t0); osc.stop(t1 + 0.02);
+      this.nodes.push(osc, g);
+    });
   });
 };
 
 const noteLabel = (n) => (n.rest ? "rest" : `${n.display} ${n.tab || "—"}`);
+// a main note at the chosen density (per beat, or per strong beat)
+const isMain = (n) => !n.rest && n.level >= (H.mode === "strong" ? 2 : 1);
+const holdEnd = (n) => n.hold?.[H.mode] ?? n.end;
 
 // ---- instrument ------------------------------------------------------------------
 
@@ -65,7 +76,8 @@ function renderInstrument(hv) {
   $("#harp-name").textContent = inst.short_name;
   $("#harp-legend").replaceChildren(...(inst.diatonic
     ? [el("b", {}, "3↑"), " blow · ", el("b", {}, "3↓"), " draw · ", el("b", {}, "′ ″ ‴"), " bend ½ / 1 / 1½ steps"]
-    : [el("b", {}, "3↑"), " blow · ", el("b", {}, "3↓"), " draw · ", el("b", {}, "●"), " button in"]));
+    : [el("b", {}, "3↑"), " blow · ", el("b", {}, "3↓"), " draw · ", el("b", {}, "●"), " button in"]),
+  " · ", el("b", {}, "1-3↑"), " holes 1–3 together");
   $("#fast-notes").checked = !!hv.fast;
   const sug = (hv.suggestions || []).slice(0, 4);
   const box = $("#harp-suggest");
@@ -93,9 +105,13 @@ function makeNoteChip(id) {
     else if (n.selected) cls.push("alt");
   }
   if (n.source === "instr") cls.push("instr");
+  if (!n.rest) cls.push(isMain(n) ? "main" : "passing");
+  const role = n.rest ? "" : isMain(n)
+    ? ` – main note, hold until ${fmtTime(holdEnd(n))} to skip the passing notes`
+    : " – passing note";
   const title = n.rest ? `${fmtTime(n.start)} – removed; click to restore`
     : !n.in_range ? `${fmtTime(n.start)} – ${n.name} is out of the harmonica's range`
-    : `${fmtTime(n.start)} – ${n.name}${n.source === "instr" ? " (from the instruments)" : ""} – click to edit`;
+    : `${fmtTime(n.start)} – ${n.name}${n.source === "instr" ? " (from the instruments)" : ""}${role} – click to edit`;
   const chip = el("button", { class: cls.join(" "), dataset: { nid: id }, title, "aria-haspopup": "menu" },
     el("span", { class: "nm" }, n.rest ? "×" : n.display),
     el("span", { class: "tb" }, n.rest ? "" : n.tab || "—"));
@@ -105,10 +121,44 @@ function makeNoteChip(id) {
   return chip;
 }
 
+// a harmonica chord: neighbouring holes played together
+function makeHarpChordChip(id) {
+  const c = H.chords.get(id);
+  const cls = ["chip", "hchord"];
+  if (!c.tab) cls.push("none");
+  else if (!c.full) cls.push("partial");
+  const where = c.tab && `${c.breath} holes ${c.holes[0]}–${c.holes[1]} together${c.button ? ", button in" : ""}`;
+  const title = !c.tab ? `${fmtTime(c.start)} – ${c.label}: no chord on this harp fits, play the melody`
+    : `${fmtTime(c.start)} – ${c.label}: ${where} (${c.notes.join(" ")})`
+      + `${c.full ? "" : " – a partial chord, only some of its notes"}. Click to hear it.`;
+  const chip = el("button", { class: cls.join(" "), dataset: { hid: id }, title },
+    el("span", { class: "lb" }, c.label),
+    el("span", { class: "tb" }, c.tab ? `${c.tab}${c.full ? "" : "~"}` : "—"));
+  if (c.tab) {
+    chip.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const dur = Math.min(Math.max(c.end - c.start, 0.8), 6);
+      playSection(c.start, dur, () => synth.playNote(c.midis, dur));
+    });
+  }
+  return chip;
+}
+
+const makeHarpChip = (id) => (H.chords.has(id) ? makeHarpChordChip(id) : makeNoteChip(id));
+
+// put a lyric cell's chord chips on their own line above its notes
+function liftChords(node) {
+  node.querySelectorAll(".chords").forEach((box) => {
+    const chips = [...box.querySelectorAll(".hchord")];
+    if (chips.length) box.before(el("span", { class: "hchords" }, chips));
+  });
+}
+
 function renderHarmonica() {
   const song = S.song;
   const hv = song.harmonica;
   H.notes = new Map();
+  H.chords = new Map();
   H.timeline = [];
   H.words = [];
   H.chipNodes = new Map();
@@ -130,9 +180,14 @@ function renderHarmonica() {
 
   renderInstrument(hv);
   H.notes = new Map(hv.notes.map((n) => [n.id, n]));
-  H.timeline = hv.notes.filter((n) => !n.rest).sort((a, b) => a.start - b.start);
-  const instr = H.timeline.filter((n) => n.source === "instr").length;
-  const meta = [el("span", { class: "badge" }, `${H.timeline.length} notes`)];
+  H.chords = new Map((hv.chords || []).map((c) => [c.id, c]));
+  const sounding = hv.notes.filter((n) => !n.rest).sort((a, b) => a.start - b.start);
+  H.timeline = H.mainOnly ? sounding.filter(isMain) : sounding;
+  const instr = sounding.filter((n) => n.source === "instr").length;
+  const mains = sounding.filter(isMain).length;
+  const meta = [el("span", { class: "badge" }, `${sounding.length} notes`),
+    el("span", { class: "badge", title: "Hold each main note until the next one for a simpler melody, or play the passing notes in between." },
+      `${mains} main`)];
   meta.push(el("span", { class: "badge" + (hv.in_range < 1 ? " err" : ""),
     title: `The harmonica plays ${hv.range[0]} to ${hv.range[1]}` },
   hv.in_range < 1 ? `${Math.round(hv.in_range * 100)}% playable` : "all playable"));
@@ -153,15 +208,16 @@ function renderHarmonica() {
       const items = [el("span", { class: "tag" }, "instr.")];
       if (row.bars) {
         items.push(el("span", { class: "bars" }, row.bars.map((bar) => el("span", { class: "barcell", title: `Bar ${bar.bar + 1}` },
-          bar.chords.length ? bar.chords.map(makeNoteChip) : el("span", { class: "repeat" }, "–")))));
+          bar.chords.length ? bar.chords.map(makeHarpChip) : el("span", { class: "repeat" }, "–")))));
       } else {
-        items.push(...row.chords.map(makeNoteChip));
+        items.push(...row.chords.map(makeHarpChip));
       }
       return el("div", { class: "line instrumental" }, items);
     }
     const cells = row.words.map((w) => {
       const src = song.lines[row.line].words[w.i];
-      const { node, timing } = lyricCell(w, src, makeNoteChip, null, seekPlay);
+      const { node, timing } = lyricCell(w, src, makeHarpChip, null, seekPlay);
+      liftChords(node);
       H.words.push({ start: w.start, end: w.end, node: timing });
       return node;
     });
@@ -170,6 +226,8 @@ function renderHarmonica() {
   if (!rows.length) rows.push(el("p", { class: "muted" }, "No melody found."));
   sheet.replaceChildren(...rows);
   sheet.classList.toggle("show-bars", $("#show-bars").checked);
+  sheet.classList.toggle("main-only", H.mainOnly);
+  sheet.classList.toggle("no-hchords", !H.showChords);
   H.words.sort((a, b) => a.start - b.start);
 }
 
@@ -181,12 +239,14 @@ function resetHarpFollow() {
 
 function harpTick(t) {
   const i = findAt(H.timeline, t);
-  const cur = i >= 0 && t < H.timeline[i].end + 0.05 ? H.timeline[i] : null;
+  // with main notes only, a main note stays lit while you hold it
+  const end = (n) => (H.mainOnly ? holdEnd(n) : n.end);
+  const cur = i >= 0 && t < end(H.timeline[i]) + 0.05 ? H.timeline[i] : null;
   if (cur?.id !== H.activeNote) {
     (H.chipNodes.get(H.activeNote) || []).forEach((n) => n.classList.remove("active"));
     (H.chipNodes.get(cur?.id) || []).forEach((n) => n.classList.add("active"));
     H.activeNote = cur?.id ?? null;
-    $("#now-chord").textContent = cur ? noteLabel(cur) : "–";
+    $("#now-chord").textContent = cur ? `${H.mainOnly ? "hold " : ""}${noteLabel(cur)}` : "–";
   }
   const next = H.timeline[i + 1];
   $("#next-chord").textContent = next ? `${noteLabel(next)} in ${Math.max(0, next.start - t).toFixed(1)}s` : "–";
@@ -277,6 +337,20 @@ function openNoteMenu(id, anchor) {
         ? el("button", { class: "link", onclick: () => { closeChordMenu(); saveNote(id, { auto_fingering: true }); } }, "auto")
         : null));
   }
+  if (!n.rest) {
+    const main = isMain(n);
+    rows.push(el("div", { class: "fingering-row" },
+      el("span", { class: "lbl", title: "Hold a main note until the next one, or play the passing notes in between" }, "Role"),
+      el("button", { class: main ? "on" : "", "aria-pressed": String(main),
+        title: "A main note on every beat and strong beat: hold it until the next main note",
+        onclick: () => { closeChordMenu(); saveNote(id, { main: true }); } }, "★ Main note"),
+      el("button", { class: main ? "" : "on", "aria-pressed": String(!main),
+        title: "A note between the main ones: add it for nuance, or skip it",
+        onclick: () => { closeChordMenu(); saveNote(id, { main: false }); } }, "Passing note"),
+      n.main_pinned
+        ? el("button", { class: "link", onclick: () => { closeChordMenu(); saveNote(id, { auto_main: true }); } }, "auto")
+        : null));
+  }
   if (!n.rest && !n.in_range) {
     rows.push(el("div", { class: "hint warn" },
       `${n.name} is outside the harmonica (${S.song.harmonica.range.join("–")}). Try Octave − / + or type another note.`));
@@ -361,6 +435,26 @@ function initHarmonica() {
   $("#harp-type").addEventListener("change", (e) => saveSettings({ harmonica_type: e.target.value }));
   $("#harp-key").addEventListener("change", (e) => saveSettings({ harmonica_key: e.target.value }));
   $("#add-note-btn").addEventListener("click", (e) => openAddNote(e.currentTarget));
+  // main notes, main-only and the chord line only change the view: no round trip
+  $("#main-mode").value = H.mode;
+  $("#main-only").checked = H.mainOnly;
+  $("#harp-chords").checked = H.showChords;
+  const rerender = () => { if (S.song?.harmonica) { renderHarmonica(); tick(); } };
+  $("#main-mode").addEventListener("change", (e) => {
+    H.mode = e.target.value;
+    store.set("mixpipe.harpMain", H.mode);
+    rerender();
+  });
+  $("#main-only").addEventListener("change", (e) => {
+    H.mainOnly = e.target.checked;
+    store.set("mixpipe.harpMainOnly", H.mainOnly ? "1" : "0");
+    rerender();
+  });
+  $("#harp-chords").addEventListener("change", (e) => {
+    H.showChords = e.target.checked;
+    store.set("mixpipe.harpChords", H.showChords ? "1" : "0");
+    $("#harp-sheet").classList.toggle("no-hchords", !H.showChords);
+  });
 }
 
 initHarmonica();

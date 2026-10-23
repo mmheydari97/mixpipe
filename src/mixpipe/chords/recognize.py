@@ -39,24 +39,14 @@ import numpy as np
 
 from ..io_utils import to_sample_rate
 from ..pitch import KK_MAJOR, KK_MINOR
-from .theory import TIME_SIGNATURES, note_names_for_key
+from .theory import CHORD_TONES, TIME_SIGNATURES, note_names_for_key
 from .theory import key_label as theory_key_label
 
 SR = 22_050
 HOP = 512
 
 # suffix -> intervals above the root, in template order (root first)
-QUALITIES: dict[str, tuple[int, ...]] = {
-    "": (0, 4, 7),
-    "m": (0, 3, 7),
-    "7": (0, 4, 7, 10),
-    "maj7": (0, 4, 7, 11),
-    "m7": (0, 3, 7, 10),
-    "sus2": (0, 2, 7),
-    "sus4": (0, 5, 7),
-    "dim": (0, 3, 6),
-    "aug": (0, 4, 8),
-}
+QUALITIES = CHORD_TONES
 
 # Subtracted from the score so a plain triad wins unless the colour tone is
 # clearly there. Harmonics of a triad already leak a little 7th and 9th energy.

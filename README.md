@@ -294,9 +294,11 @@ key. Each change keeps three ranked candidates.
 Speech-to-text runs locally with `mlx-whisper` (large-v3-turbo, ~1.6 GB download
 on first use). OpenRouter is an optional backend: pick any transcription model
 in the UI (needs `OPENROUTER_API_KEY`: `cp .env_template .env` and fill it in; `.env` is git-ignored and loaded automatically). Only OpenAI-compatible upstreams return
-word timestamps; for the rest, timings are estimated and the sheet says so. The
-"Polish lyrics" button sends the lyric *text* to an OpenRouter chat model (type
-`free` in the model search to put free models first) and shows a diff first.
+word timestamps; for the rest, timings are estimated and the sheet says so. Lyric
+revision sends the lyric *text* (never audio) to an OpenRouter chat model, which reads the
+whole song and fixes misheard lines (type `free` in the model search to put free models
+first). Tick *Revise the lyrics with an LLM* on a new song to run it after transcription,
+or use *Revise with LLM…* in the lyric editor to see a diff first.
 
 Beyond that: chord changes are timed between the beats (so a chord that arrives early on
 the "and of 4" gets its bar line right), songs that change time signature get meter

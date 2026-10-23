@@ -129,8 +129,15 @@ Your browser opens **http://127.0.0.1:8765**. Stop the server with `Ctrl+C`.
   and word are highlighted and the footer shows *Now* / *Next*.
 - **Edit lyrics**: one line per row, blank line between verses. Chords stay
   at their times and re-land on the right words.
-- **Polish lyrics…**: lets an OpenRouter chat model fix misheard words. You see
-  the changes before anything is saved (needs an API key).
+  - **Revise with LLM…** (in the editor): an OpenRouter chat model reads the
+    whole lyric with the song's title and fixes lines that were misheard, and
+    makes repeated choruses match. You see the changes; *Put in the editor*
+    puts them in the editor, and *Save lyrics* keeps them (needs an API key).
+- **Revise the lyrics with an LLM** (new song option): the same revision runs
+  right after transcription, without a review. It is skipped if the model
+  rewrites the song instead of correcting it (it shares less than about a third
+  of its words with what was heard), and a failed request keeps the lyrics as
+  heard. The song's header says *lyrics revised · N words*.
 - **Transpose − / +**, **Capo**: change what's displayed and exported. When a
   capo would put clearly more of the song on open shapes, a *Try capo N* link
   appears. "▶ hear" always plays at the recording's real pitch.
@@ -254,7 +261,7 @@ folder. Songs analysed this way also show up in the web UI.
 
 ## 5. Optional: OpenRouter
 
-Only needed for cloud transcription or *Polish lyrics*. Set the key in the
+Only needed for cloud transcription or *lyric revision*. Set the key in the
 same terminal **before** starting the UI:
 
 ```bash
@@ -264,10 +271,10 @@ make chords-ui
 
 In the model search box, typing **free** puts free models first. At the time
 of writing there are no free *transcription* models on OpenRouter (local
-Whisper is the free option), but there are free chat models for *Polish
-lyrics*. Only OpenAI-compatible transcription models (e.g. `openai/whisper-*`)
+Whisper is the free option), but there are free chat models for the
+*lyric revision*. Only OpenAI-compatible transcription models (e.g. `openai/whisper-*`)
 return word timings; with others the sheet is marked *word timing
-approximate*. Polish lyrics sends only the lyric text, never audio.
+approximate*. Lyric revision sends only the lyric text, never audio.
 
 ## 6. Where songs are stored
 

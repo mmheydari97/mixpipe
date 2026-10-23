@@ -65,6 +65,11 @@ class BarGrid:
     def _section_of_beat(self, beat: int) -> int:
         return max(0, bisect.bisect_right([sec["beat"] for sec in self.secs], beat) - 1)
 
+    def beat_in_bar(self, beat: int) -> tuple[int, int]:
+        """(position of beat index `beat` in its bar, 0 = downbeat; the bar's beats)."""
+        sec = self.secs[self._section_of_beat(beat)]
+        return (beat - sec["beat"]) % sec["m"], sec["m"]
+
     def bar_of(self, t: float) -> int:
         beat = self.beat_index(t)
         k = self._section_of_beat(beat)
