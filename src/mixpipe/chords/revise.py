@@ -44,7 +44,9 @@ not merge, split, add or remove lines. No titles, section labels, notes or \
 commentary. Return only the lyrics."""
 
 MIN_SIMILARITY = 0.35   # an unreviewed revision sharing fewer words than this is a rewrite: drop it
-MAX_TOKENS = 6000
+BASE_TOKENS = 6000      # reply budget: room for a reasoning model's thinking...
+TOKENS_PER_CHAR = 2     # ...plus the lyric itself (non-Latin scripts take ~1 token a character)
+MAX_TOKENS = 32000      # a reply cut off is retried once with twice the budget, up to this
 
 _FENCE = re.compile(r"^```[\w-]*\s*\n(.*?)\n?```\s*$", re.S)
 
@@ -74,8 +76,13 @@ def changed_words(old: str, new: str) -> int:
 def revise_text(text: str, model: str, title: str | None = None, language: str | None = None,
                 chat: Callable | None = None) -> str:
     """The lyric `text` (one line per row) revised by `model`. `chat(messages,
-    model=, max_tokens=)` defaults to openrouter.chat. Raises on API errors and
-    on an empty reply."""
+    model=, max_tokens=, reasoning_effort=)` defaults to openrouter.chat.
+
+    Reasoning models are asked to think briefly; a reply that still runs out of
+    tokens is retried once with twice the budget. Raises on API errors, on an
+    empty reply, and (openrouter.CutOff) when even the retry is cut off."""
+    from ..openrouter import CutOff
+
     if chat is None:
         from .. import openrouter
         chat = openrouter.chat
@@ -85,8 +92,18 @@ def revise_text(text: str, model: str, title: str | None = None, language: str |
     if language and language not in ("auto", "none"):
         context.append(f"Language: {language}")
     user = ("\n".join(context) + "\n\nTranscript:\n" if context else "") + text
-    reply = chat([{"role": "system", "content": PROMPT}, {"role": "user", "content": user}],
-                 model=model, max_tokens=MAX_TOKENS)
+    messages = [{"role": "system", "content": PROMPT}, {"role": "user", "content": user}]
+    budget = min(MAX_TOKENS, BASE_TOKENS + TOKENS_PER_CHAR * len(text))
+    try:
+        reply = chat(messages, model=model, max_tokens=budget, reasoning_effort="low")
+    except CutOff:
+        retry = min(MAX_TOKENS, 2 * budget)
+        try:
+            reply = chat(messages, model=model, max_tokens=retry, reasoning_effort="low")
+        except CutOff as exc:
+            raise CutOff(f"{model} used up {retry} tokens without finishing the lyrics. It is "
+                         "probably a reasoning model that thinks at length: pick one that "
+                         "doesn't (e.g. a Gemini Flash, Llama or Mistral model)") from exc
     revised = _clean(reply)
     if not revised:
         raise RuntimeError(f"{model} returned no lyrics")

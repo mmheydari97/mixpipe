@@ -33,9 +33,10 @@ def LINES():
 
 
 def fake_chat(reply, seen=None):
-    def chat(messages, model, max_tokens):
+    def chat(messages, model, max_tokens, reasoning_effort=None):
         if seen is not None:
-            seen.append({"messages": messages, "model": model})
+            seen.append({"messages": messages, "model": model, "max_tokens": max_tokens,
+                         "reasoning_effort": reasoning_effort})
         return reply
     return chat
 
@@ -58,6 +59,29 @@ def test_revise_text_sends_the_whole_lyric_with_title_and_language():
     assert seen[1]["messages"][1]["content"] == "x y"
     with pytest.raises(RuntimeError):
         revise_text("x", "a/model", chat=fake_chat("  "))
+    assert seen[0]["reasoning_effort"] == "low"
+    assert seen[0]["max_tokens"] == 6000 + 2 * len("I scream of you\nevery night")
+
+
+def test_a_cut_off_reply_is_retried_with_a_bigger_budget():
+    from mixpipe.openrouter import CutOff
+
+    budgets = []
+
+    def thinker(limit):
+        def chat(messages, model, max_tokens, reasoning_effort=None):
+            budgets.append(max_tokens)
+            if max_tokens < limit:
+                raise CutOff("cut off")
+            return "I dream of you"
+        return chat
+    assert revise_text("I scream of you", "a/model", chat=thinker(10_000)) == "I dream of you"
+    first = 6000 + 2 * len("I scream of you")
+    assert budgets == [first, 2 * first]
+    budgets.clear()
+    with pytest.raises(CutOff, match="reasoning model"):
+        revise_text("I scream of you", "a/model", chat=thinker(10 ** 9))
+    assert budgets == [first, 2 * first]
 
 
 def test_revise_lines_keeps_word_timing():

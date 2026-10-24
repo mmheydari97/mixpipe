@@ -173,6 +173,11 @@ def list_models(kind: str = "chat", refresh: bool = False) -> list[dict]:
 # --------------------------------------------------------------------------- #
 
 
+class CutOff(RuntimeError):
+    """The reply hit max_tokens before it was finished (often a reasoning
+    model that spent the budget thinking)."""
+
+
 def chat(
     messages: list[dict],
     model: str,
@@ -195,7 +200,7 @@ def chat(
     resp.raise_for_status()
     choice = resp.json()["choices"][0]
     if choice.get("finish_reason") == "length":
-        raise RuntimeError(f"the reply from {model} was cut off at {max_tokens} tokens")
+        raise CutOff(f"the reply from {model} was cut off at {max_tokens} tokens")
     return choice["message"]["content"] or ""
 
 
