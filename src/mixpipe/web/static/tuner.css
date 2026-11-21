@@ -1,0 +1,67 @@
+/* Guitar tuner (tuner.html); common.css loads first. */
+
+.tuner { max-width: 720px; margin: 0 auto; }
+.small { font-size: .85em; }
+
+.tuner-head { display: flex; flex-wrap: wrap; gap: 14px 24px; align-items: flex-end; justify-content: space-between; }
+.switches { display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: flex-end; }
+.switch { display: grid; gap: 4px; }
+.switch > span:first-child { font-size: .8em; color: var(--muted); }
+.switch .segmented label { padding: 5px 12px; }
+.a4 input { width: 4.5em; font: inherit; padding: 5px 6px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--surface); color: var(--text); }
+.tuning-name { margin: 14px 0 0; }
+.tuning-name .muted { font-family: var(--mono); letter-spacing: .08em; margin-left: 6px; }
+
+/* ---------- readout ---------- */
+.readout { --tone: var(--muted); margin: 18px 0 14px; padding: 18px 12px 10px; border-radius: var(--radius);
+  background: var(--surface-2); text-align: center; transition: opacity .3s; }
+.readout[data-state=note][data-tone=ok] { --tone: var(--ok); }
+.readout[data-state=note][data-tone=near] { --tone: var(--warn); }
+.readout[data-state=note][data-tone=off] { --tone: var(--danger); }
+.readout[data-state=quiet] .needle, .readout[data-state=idle] .needle { opacity: .3; }
+
+.note-line { display: flex; align-items: baseline; justify-content: center; gap: 12px; }
+.note { font-size: 3.4rem; font-weight: 700; line-height: 1; letter-spacing: -.03em; color: var(--tone); }
+.note-meta { display: grid; text-align: left; font-size: .85em; }
+
+.gauge { width: 100%; max-width: 520px; height: auto; display: block; margin: 8px auto 0; overflow: visible; }
+.gauge .zone { fill: color-mix(in srgb, var(--ok) 18%, transparent); }
+.gauge .tick { stroke: var(--muted); stroke-width: 1; }
+.gauge .tick.major { stroke-width: 2; }
+.gauge text { fill: var(--muted); font-size: 11px; }
+.needle { transition: transform .12s linear, opacity .3s; }
+.needle line { stroke: var(--tone); stroke-width: 3; stroke-linecap: round; }
+.needle circle { fill: var(--tone); }
+@media (prefers-reduced-motion: reduce) { .needle { transition: none; } }
+
+.advice { margin: 4px 0 0; font-size: 1.25rem; font-weight: 600; color: var(--tone); min-height: 1.6em; }
+.readout[data-state=idle] .advice, .readout[data-state=quiet] .advice { color: var(--muted); font-weight: 500; font-size: 1rem; }
+
+/* ---------- strings ---------- */
+.strings { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
+.string { --tone: var(--border); display: grid; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface); overflow: hidden; border-top: 4px solid var(--tone); }
+.string.ok { --tone: var(--ok); }
+.string.near { --tone: var(--warn); }
+.string.off { --tone: var(--danger); }
+.string.active { box-shadow: 0 0 0 2px var(--accent); }
+.string button { border: 0; border-radius: 0; background: transparent; justify-content: center; }
+.string .pick { display: grid; gap: 2px; padding: 8px 4px 6px; position: relative; text-align: center; }
+.string .num { color: var(--muted); font-size: .75em; }
+.string .label { font-size: 1.15rem; }
+.string .reading { font-size: .85em; font-variant-numeric: tabular-nums; color: var(--tone); min-height: 1.4em; }
+.string.none .reading { color: var(--muted); }
+.string .lock-icon { display: none; position: absolute; top: 5px; right: 5px; width: 13px; height: 13px; }
+.string .lock-icon svg { width: 100%; height: 100%; fill: var(--accent); stroke: var(--accent); }
+.string.locked .lock-icon { display: block; }
+.string.locked .pick { background: var(--accent-soft); }
+.string .ref { border-top: 1px solid var(--border); padding: 4px; font-size: .8em; color: var(--muted); }
+.string .ref:hover { color: var(--text); background: var(--surface-2); }
+.help { margin: 12px 0 0; }
+
+@media (max-width: 520px) {
+  .strings { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .note { font-size: 2.8rem; }
+  .advice { font-size: 1.1rem; }
+}

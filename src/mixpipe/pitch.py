@@ -83,8 +83,15 @@ def track_pitch(
             seg = c[tau_min:tau_max]
             below = np.nonzero(seg < _YIN_THRESHOLD)[0]
             if below.size:
-                t = tau_min + int(below[0])
-                while t + 1 < tau_max and c[t + 1] < c[t]:    # walk to the bottom of the dip
+                # the bottom of that dip: its lowest point while it stays under the
+                # threshold, not the first local minimum, which noise on a long
+                # period's wide dip puts early (reading sharp)
+                t0 = tau_min + int(below[0])
+                end = t0
+                while end + 1 < tau_max and c[end + 1] < _YIN_THRESHOLD:
+                    end += 1
+                t = t0 + int(np.argmin(c[t0:end + 1]))
+                while t + 1 < tau_max and c[t + 1] < c[t]:    # still sloping down past the threshold
                     t += 1
             else:
                 t = tau_min + int(np.argmin(seg))

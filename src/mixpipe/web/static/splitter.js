@@ -575,8 +575,7 @@ async function toggleRecord() {
   }
   const msg = $("#rec-msg");
   try {
-    REC.stream ||= await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    REC.stream ||= await micStream();
   } catch (e) { msg.textContent = `no microphone: ${e.message}`; return; }
   const ctx = ensureContext();
   // how late the mic hears you against what you heard: the output's delay, the input's

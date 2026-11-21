@@ -9,7 +9,7 @@
 
 
 // =========================================================================
-// chord parsing + audition synth
+// chord parsing + audition (synth: synth.js)
 // =========================================================================
 
 const NOTE_PC = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
@@ -33,57 +33,40 @@ function parseChord(label) {
   return { root, pcs: ivs.map((i) => (root + i) % 12), bass };
 }
 
-const synth = {
-  ctx: null,
-  nodes: [],
-  timer: null,
-  ensure() {
-    if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
-    if (this.ctx.state === "suspended") this.ctx.resume();
-    return this.ctx;
-  },
-  // Re-strike the chord on every beat, piano-ish decay, quietly under the track.
-  play(chordInfo, duration, beat) {
-    this.stop();
-    const ctx = this.ensure();
-    const out = ctx.createGain();
-    out.gain.value = 0.16;
-    const lp = ctx.createBiquadFilter();
-    lp.type = "lowpass"; lp.frequency.value = 2400;
-    lp.connect(out); out.connect(ctx.destination);
-    this.nodes.push(out, lp);
+// Re-strike the chord on every beat, piano-ish decay, quietly under the track.
+synth.play = function (chordInfo, duration, beat) {
+  this.stop();
+  const ctx = this.ensure();
+  const out = ctx.createGain();
+  out.gain.value = 0.16;
+  const lp = ctx.createBiquadFilter();
+  lp.type = "lowpass"; lp.frequency.value = 2400;
+  lp.connect(out); out.connect(ctx.destination);
+  this.nodes.push(out, lp);
 
-    const bassPc = chordInfo.bass ?? chordInfo.root;
-    const midis = [36 + bassPc, ...chordInfo.pcs.map((pc) => 60 + ((pc - 0 + 12) % 12))];
-    const hz = (m) => 440 * 2 ** ((m - 69) / 12);
-    const t0 = ctx.currentTime + 0.02;
-    beat = Math.max(0.25, beat || 0.5);
-    const hits = Math.max(1, Math.floor(duration / beat));
-    for (let h = 0; h < hits; h++) {
-      const start = t0 + h * beat;
-      midis.forEach((m, i) => {
-        const osc = ctx.createOscillator();
-        osc.type = i === 0 ? "sine" : "triangle";
-        osc.frequency.value = hz(m);
-        const g = ctx.createGain();
-        const peak = i === 0 ? 0.9 : 0.5;
-        const strum = start + i * 0.012;
-        g.gain.setValueAtTime(0, strum);
-        g.gain.linearRampToValueAtTime(peak, strum + 0.01);
-        g.gain.exponentialRampToValueAtTime(0.001, strum + Math.min(beat * 1.6, 1.8));
-        osc.connect(g); g.connect(lp);
-        osc.start(strum); osc.stop(strum + Math.min(beat * 1.6, 1.8) + 0.05);
-        this.nodes.push(osc, g);
-      });
-    }
-  },
-  stop() {
-    for (const n of this.nodes) {
-      try { n.stop ? n.stop() : null; } catch { /* already stopped */ }
-      try { n.disconnect(); } catch { /* already disconnected */ }
-    }
-    this.nodes = [];
-  },
+  const bassPc = chordInfo.bass ?? chordInfo.root;
+  const midis = [36 + bassPc, ...chordInfo.pcs.map((pc) => 60 + ((pc - 0 + 12) % 12))];
+  const hz = (m) => 440 * 2 ** ((m - 69) / 12);
+  const t0 = ctx.currentTime + 0.02;
+  beat = Math.max(0.25, beat || 0.5);
+  const hits = Math.max(1, Math.floor(duration / beat));
+  for (let h = 0; h < hits; h++) {
+    const start = t0 + h * beat;
+    midis.forEach((m, i) => {
+      const osc = ctx.createOscillator();
+      osc.type = i === 0 ? "sine" : "triangle";
+      osc.frequency.value = hz(m);
+      const g = ctx.createGain();
+      const peak = i === 0 ? 0.9 : 0.5;
+      const strum = start + i * 0.012;
+      g.gain.setValueAtTime(0, strum);
+      g.gain.linearRampToValueAtTime(peak, strum + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.001, strum + Math.min(beat * 1.6, 1.8));
+      osc.connect(g); g.connect(lp);
+      osc.start(strum); osc.stop(strum + Math.min(beat * 1.6, 1.8) + 0.05);
+      this.nodes.push(osc, g);
+    });
+  }
 };
 
 // =========================================================================

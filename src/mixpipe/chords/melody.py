@@ -34,8 +34,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..io_utils import to_sample_rate
-from .harmonica import note_label
-from .theory import key_names, parse_key
+from .theory import key_names, note_label, parse_key
 
 SR = 16_000
 HOP = 256                      # 16 ms

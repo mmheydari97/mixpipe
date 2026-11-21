@@ -28,13 +28,13 @@ def hub(tmp_path, wav_bytes):
 def test_home_page_links_every_tool(hub):
     r = hub.get("/")
     assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"
-    for path in ('href="/chords/"', 'href="/splitter/"', 'href="/mixer/"'):
+    for path in ('href="/chords/"', 'href="/splitter/"', 'href="/mixer/"', 'href="/tuner/"'):
         assert path in r.text
     assert "/static/home.js?v=" in r.text and "/static/common.js?v=" in r.text
 
 
 @pytest.mark.parametrize("tool,script", [("chords", "app.js"), ("splitter", "splitter.js"),
-                                         ("mixer", "mixer.js")])
+                                         ("mixer", "mixer.js"), ("tuner", "tuner.js")])
 def test_each_tool_is_served_under_its_path(hub, tool, script):
     r = hub.get(f"/{tool}/")
     assert r.status_code == 200
@@ -48,6 +48,8 @@ def test_apis_live_under_each_tool(hub):
     assert hub.get("/chords/api/songs").json() == []
     assert hub.get("/chords/api/openrouter/status").status_code == 200
     assert hub.get("/mixer/api/config").status_code == 200
+    assert [t["name"] for t in hub.get("/tuner/api/tunings").json()] == [
+        "Standard", "Drop D", "D standard", "Drop C"]
     assert hub.get("/api/songs").status_code == 404     # no tool owns the root's /api
 
 

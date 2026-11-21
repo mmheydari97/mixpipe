@@ -27,6 +27,11 @@ def note_names_for_key(tonic: int, mode: str) -> list[str]:
     return FLAT if flat else SHARP
 
 
+def note_label(midi: int, names: list[str] = NEUTRAL) -> str:
+    """72 -> "C5" (scientific pitch, octave 4 starts at middle C)."""
+    return f"{names[midi % 12]}{midi // 12 - 1}"
+
+
 def note_pc(name: str) -> int | None:
     m = re.match(r"^([A-G])([#b♯♭]?)$", name.strip())
     if not m:
@@ -213,6 +218,36 @@ def instrument_profile(instrument: str | None) -> dict:
 
 def instrument_choices() -> list[dict]:
     return [{"id": k, "label": v["label"], "tuning": v["tuning"]} for k, v in INSTRUMENTS.items()]
+
+
+# --------------------------------------------------------------------------- #
+# guitar tunings (the tuner)
+# --------------------------------------------------------------------------- #
+
+GUITAR_STANDARD = (40, 45, 50, 55, 59, 64)   # E2 A2 D3 G3 B3 E4: string 6 -> string 1
+_GUITAR_TUNING_NAMES = {(False, False): "Standard", (True, False): "D standard",
+                        (False, True): "Drop D", (True, True): "Drop C"}
+
+
+def guitar_tuning(whole_down: bool = False, drop6: bool = False) -> dict:
+    """A 6-string tuning from two switches: the whole guitar a whole step down
+    (DGCFAD), and the 6th string a further whole step down (DADGBE, CGCFAD).
+    Strings run 6 (lowest) to 1."""
+    shift = -2 if whole_down else 0
+    midis = [m + shift for m in GUITAR_STANDARD]
+    if drop6:
+        midis[0] -= 2
+    return {
+        "name": _GUITAR_TUNING_NAMES[(bool(whole_down), bool(drop6))],
+        "whole_down": bool(whole_down), "drop6": bool(drop6),
+        "strings": [{"string": 6 - i, "midi": m, "label": note_label(m, SHARP)}
+                    for i, m in enumerate(midis)],
+    }
+
+
+def guitar_tunings() -> list[dict]:
+    """Every combination of the two switches."""
+    return [guitar_tuning(w, d) for w in (False, True) for d in (False, True)]
 
 
 def _easy_fraction(chords: list[tuple[int, str, float]], shift: int,

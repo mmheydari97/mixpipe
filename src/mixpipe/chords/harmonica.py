@@ -51,7 +51,8 @@ from dataclasses import dataclass
 
 from .align import BarGrid, _visible, build_rows, chord_label, grid_for
 from .syllables import make_syllabifier
-from .theory import NEUTRAL, chord_pcs, key_label, key_names, note_pc, parse_key, transpose_label
+from .theory import (NEUTRAL, chord_pcs, key_label, key_names, note_label, note_pc, parse_key,
+                     transpose_label)
 
 HOLES = 12
 LOWEST = 60            # C4, hole 1 blow
@@ -262,11 +263,6 @@ def fit_octave(notes: list[tuple[int, float]], instrument: Instrument | None = N
 # --------------------------------------------------------------------------- #
 # note names
 # --------------------------------------------------------------------------- #
-
-
-def note_label(midi: int, names: list[str] = NEUTRAL) -> str:
-    """72 -> "C5" (scientific pitch, octave 4 starts at middle C)."""
-    return f"{names[midi % 12]}{midi // 12 - 1}"
 
 
 def pretty(name: str) -> str:

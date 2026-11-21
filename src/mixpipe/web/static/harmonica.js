@@ -1,7 +1,7 @@
 "use strict";
 // Harmonica tab: the melody as tab for a 12-hole chromatic or a 10-hole diatonic
 // harmonica in any key.
-// Load after app.js; uses its S, audio, synth, and sheet.js's fmtTime, findAt, followWord,
+// Load after app.js; uses its S, audio, synth (synth.js), and sheet.js's fmtTime, findAt, followWord,
 // showMenu, closeChordMenu, playSection, stopAudition, saveSettings, alertInline.
 
 const H = {
@@ -18,42 +18,6 @@ const H = {
 };
 
 const harpJob = createJobUI(["decode", "melody"], { decode: "Decode", melody: "Melody" });
-
-// A reed-ish tone: detuned saw + square through a lowpass, with a soft attack.
-// `midi` is one note or a list (a chord: holes played together).
-synth.playNote = function (midi, duration) {
-  this.stop();
-  const midis = [].concat(midi);
-  const ctx = this.ensure();
-  const out = ctx.createGain();
-  out.gain.value = 0.12 / Math.sqrt(midis.length);
-  const lp = ctx.createBiquadFilter();
-  lp.type = "lowpass"; lp.frequency.value = 2200; lp.Q.value = 0.7;
-  lp.connect(out); out.connect(ctx.destination);
-  this.nodes.push(out, lp);
-  const t0 = ctx.currentTime + 0.02;
-  const t1 = t0 + Math.max(0.3, duration);
-  const env = ctx.createGain();
-  env.gain.setValueAtTime(0, t0);
-  env.gain.linearRampToValueAtTime(1, t0 + 0.04);
-  env.gain.setValueAtTime(1, t1 - 0.08);
-  env.gain.linearRampToValueAtTime(0, t1);
-  env.connect(lp);
-  this.nodes.push(env);
-  midis.forEach((m) => {
-    const hz = 440 * 2 ** ((m - 69) / 12);
-    [["sawtooth", 1, 0.6], ["square", 1.003, 0.35]].forEach(([type, ratio, level]) => {
-      const osc = ctx.createOscillator();
-      osc.type = type;
-      osc.frequency.value = hz * ratio;
-      const g = ctx.createGain();
-      g.gain.value = level;
-      osc.connect(g); g.connect(env);
-      osc.start(t0); osc.stop(t1 + 0.02);
-      this.nodes.push(osc, g);
-    });
-  });
-};
 
 const noteLabel = (n) => (n.rest ? "rest" : `${n.display} ${n.tab || "—"}`);
 // a main note at the chosen density (per beat, or per strong beat)

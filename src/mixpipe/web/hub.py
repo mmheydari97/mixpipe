@@ -1,11 +1,11 @@
-"""All three web apps on one port, with a home page to pick one.
+"""All the web apps on one port, with a home page to pick one.
 
     python -m mixpipe.cli ui                # http://127.0.0.1:8760
 
-The chord finder, the splitter and the mixer are mounted unchanged under
-/chords, /splitter and /mixer; each page finds its own API from its path
-(BASE in static/common.js), so the same pages also work standalone on their
-own ports (chords-ui, split-ui, mix-ui). The splitter's library is the mixer's
+The chord finder, the splitter, the mixer and the tuner are mounted unchanged
+under /chords, /splitter, /mixer and /tuner; each page finds its own API from
+its path (BASE in static/common.js), so the same pages also work standalone on
+their own ports (chords-ui, split-ui, mix-ui, tuner-ui). The splitter's library is the mixer's
 "From the splitter" list, as it is when they run separately.
 """
 
@@ -17,7 +17,7 @@ from fastapi import FastAPI
 
 from .common import mount_static, page_html
 
-TOOLS = ("chords", "splitter", "mixer")
+TOOLS = ("chords", "splitter", "mixer", "tuner")
 
 
 def create_app(
@@ -30,7 +30,7 @@ def create_app(
     mixer_options: dict | None = None,
 ) -> FastAPI:
     """Build the hub. `*_options` go to each app's create_app (tests pass fakes)."""
-    from . import mixer_server, server, splitter_server
+    from . import mixer_server, server, splitter_server, tuner_server
 
     app = FastAPI(title="mixpipe")
     chords = server.create_app(chords_root, workers=workers, **(chords_options or {}))
@@ -47,4 +47,5 @@ def create_app(
     app.mount("/chords", chords)
     app.mount("/splitter", splitter)
     app.mount("/mixer", mixer)
+    app.mount("/tuner", tuner_server.create_app())
     return app

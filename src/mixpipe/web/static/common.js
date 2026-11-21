@@ -1,5 +1,5 @@
 "use strict";
-// Shared by the web apps (chord finder, splitter, mixer). Load before the app script.
+// Shared by the web apps (chord finder, splitter, mixer, tuner). Load before the app script.
 
 // =========================================================================
 // helpers
@@ -59,6 +59,11 @@ async function downloadFile(path, opts = {}, fallback = "download") {
 const jsonBody = (method, data) => ({
   method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
 });
+
+// The microphone as it is: no echo cancelling, noise suppression or gain riding,
+// which would bend a recorded take and fool the tuner's level and pitch.
+const micStream = () => navigator.mediaDevices.getUserMedia({
+  audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
 
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -380,7 +385,8 @@ function createSourcePicker(container, { multiple = false, hint = "", onChange =
 // the other tools (only under the hub, where they share this page's port)
 // =========================================================================
 
-const TOOLS = [["/", "Home"], ["/chords/", "Chords"], ["/splitter/", "Splitter"], ["/mixer/", "Mixer"]];
+const TOOLS = [["/", "Home"], ["/chords/", "Chords"], ["/splitter/", "Splitter"], ["/mixer/", "Mixer"],
+  ["/tuner/", "Tuner"]];
 if (BASE) {
   $(".topbar")?.append(el("nav", { class: "tools", "aria-label": "MixPipe tools" },
     TOOLS.map(([href, label]) => el("a", {

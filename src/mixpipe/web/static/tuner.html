@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MixPipe Tuner</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23b4441f'/%3E%3Cpath d='M6 22a10 10 0 0 1 20 0' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round'/%3E%3Cpath d='M16 22 20 12' stroke='white' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/common.css">
+  <link rel="stylesheet" href="/static/tuner.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="./">mixpipe <span>tuner</span></a>
+  </header>
+
+  <main>
+    <section class="card tuner">
+      <div class="tuner-head">
+        <button id="mic" class="primary">Start tuning</button>
+        <div class="switches">
+          <div class="switch">
+            <span>Whole step down</span>
+            <div class="segmented" role="radiogroup" aria-label="Whole step down">
+              <label><input type="radio" name="whole" value="0" checked> Off</label>
+              <label><input type="radio" name="whole" value="1"> On</label>
+            </div>
+          </div>
+          <div class="switch">
+            <span>Drop 6th string</span>
+            <div class="segmented" role="radiogroup" aria-label="Drop the 6th string">
+              <label><input type="radio" name="drop6" value="0" checked> Off</label>
+              <label><input type="radio" name="drop6" value="1"> On</label>
+            </div>
+          </div>
+          <label class="switch a4">
+            <span>A4</span>
+            <span><input type="number" id="a4" min="420" max="460" step="1" value="440"> Hz</span>
+          </label>
+        </div>
+      </div>
+      <p class="tuning-name"><b id="tuning-name">Standard</b> <span id="tuning-notes" class="muted"></span></p>
+
+      <div id="readout" class="readout" data-state="idle">
+        <div class="note-line">
+          <span id="note" class="note">—</span>
+          <span class="note-meta"><span id="string-no"></span><span id="hz" class="muted"></span></span>
+        </div>
+        <svg id="gauge" class="gauge" viewBox="0 0 400 84" role="img" aria-label="How far off the string is, in cents">
+          <rect class="zone" x="182" y="14" width="36" height="46" rx="4"/>
+          <g id="ticks"></g>
+          <g id="needle" class="needle"><line x1="200" y1="10" x2="200" y2="62"/><circle cx="200" cy="10" r="5"/></g>
+        </svg>
+        <p id="advice" class="advice" aria-live="polite">Start the microphone, then play one string.</p>
+      </div>
+
+      <div id="strings" class="strings" aria-label="Strings, 6 (lowest) to 1"></div>
+      <p class="muted small help">The tuner finds which string you play. If a string is far off
+        (new strings) or it picks the wrong one, tap the string to lock it; tap again to go back to
+        automatic. ▶ plays the note to tune by ear.</p>
+    </section>
+  </main>
+
+  <script src="/static/common.js"></script>
+  <script src="/static/synth.js"></script>
+  <script src="/static/tuner.js"></script>
+</body>
+</html>

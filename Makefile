@@ -1,4 +1,4 @@
-.PHONY: install install-chords stems demo-session verify-mix analyze mix mix-llm chat ui studio mix-ui install-acestep acestep chords chords-ui split split-ui test clean
+.PHONY: install install-chords stems demo-session verify-mix analyze mix mix-llm chat ui studio mix-ui tuner-ui install-acestep acestep chords chords-ui split split-ui test clean
 
 # Use the project venv when there is one, so targets work without activating it.
 PY := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
@@ -14,12 +14,15 @@ install:
 chat:
 	$(RUN) -m mixpipe.cli chat --stems $(or $(STEMS),stems/) $(ARGS)
 
-# the chord finder, splitter and mixer on one port, with a home page (http://127.0.0.1:8760)
+# the chord finder, splitter, mixer and tuner on one port, with a home page (http://127.0.0.1:8760)
 ui:
 	$(RUN) -m mixpipe.cli ui $(ARGS)
 
 mix-ui:
 	$(RUN) -m mixpipe.cli mix-ui $(ARGS)
+
+tuner-ui:
+	$(RUN) -m mixpipe.cli tuner-ui $(ARGS)
 
 # AI edits: a local ACE-Step 1.5 server, in its own checkout and venv (about 11 GB with the model)
 ACESTEP_DIR ?= ../ACE-Step-1.5

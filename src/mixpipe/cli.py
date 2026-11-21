@@ -398,6 +398,12 @@ def cmd_mix_ui(args) -> int:
                   "mixer", args.host, args.port, args.no_browser)
 
 
+def cmd_tuner_ui(args) -> int:
+    from .web.tuner_server import create_app
+
+    return _serve(create_app(), "tuner", args.host, args.port, args.no_browser)
+
+
 def cmd_ui(args) -> int:
     try:
         from .web.hub import create_app
@@ -484,7 +490,7 @@ def main(argv: list[str] | None = None) -> int:
     p_ct.add_argument("--bit-depth", type=int, choices=[16, 24], default=24)
     p_ct.set_defaults(func=cmd_chat)
 
-    p_hub = sub.add_parser("ui", help="the chord finder, splitter and mixer on one port")
+    p_hub = sub.add_parser("ui", help="the chord finder, splitter, mixer and tuner on one port")
     p_hub.add_argument("--host", default="127.0.0.1")
     p_hub.add_argument("--port", type=int, default=8760)
     p_hub.add_argument("--chords-out", default="out/chords", help="the chord finder's song store")
@@ -502,6 +508,12 @@ def main(argv: list[str] | None = None) -> int:
     p_mu.add_argument("--splitter", default="out/splitter", help="the splitter's song store")
     p_mu.add_argument("--no-browser", action="store_true")
     p_mu.set_defaults(func=cmd_mix_ui)
+
+    p_tu = sub.add_parser("tuner-ui", help="the guitar tuner on its own port")
+    p_tu.add_argument("--host", default="127.0.0.1")
+    p_tu.add_argument("--port", type=int, default=8768)
+    p_tu.add_argument("--no-browser", action="store_true")
+    p_tu.set_defaults(func=cmd_tuner_ui)
 
     p_ch = sub.add_parser("chords", help="find chords + lyrics in a song (headless)")
     p_ch.add_argument("files", nargs="+",

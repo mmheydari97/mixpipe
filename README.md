@@ -63,17 +63,24 @@ shifting, `fluidsynth` (`brew install fluid-synth`) renders MIDI.
 ## One page for everything
 
 ```bash
-make ui         # the chord finder, the splitter and the mixer on http://127.0.0.1:8760
+make ui         # the chord finder, splitter, mixer and tuner on http://127.0.0.1:8760
 make studio     # the same, plus the ACE-Step server for the mixer's AI edits
 ```
 
-The home page links to the three tools; each runs under its own path (`/chords/`,
-`/splitter/`, `/mixer/`) with a switcher in its top bar. They share one library:
+The home page links to the tools; each runs under its own path (`/chords/`,
+`/splitter/`, `/mixer/`, `/tuner/`) with a switcher in its top bar. They share one library:
 a song you split is in the mixer's "From the splitter" list, and a split song has a
 "Mix these stems" link. Each tool also still runs on its own port (`make chords-ui`
-on 8765, `split-ui` on 8766, `mix-ui` on 8767), but settings a page remembers
+on 8765, `split-ui` on 8766, `mix-ui` on 8767, `tuner-ui` on 8768), but settings a page remembers
 (models, engine, per-song mixes) are per address, so they don't carry over between
 the single-tool ports and the home page.
+
+The tuner is for a 6-string guitar. Two switches choose the tuning: whole step down
+(DGCFAD) and drop the 6th string (DADGBE; both together give CGCFAD). The page sends
+the microphone to the server, which finds the pitch with the same YIN tracker the
+pitch correction uses (`pitch.track_pitch`) and works out which string you played.
+Tap a string to lock it when it's too far off to be recognised (new strings).
+Browsers only allow the microphone on localhost or https.
 
 ## Usage
 
