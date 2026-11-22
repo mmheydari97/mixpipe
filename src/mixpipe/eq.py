@@ -102,6 +102,40 @@ def high_shelf(
     return _apply_sos(audio, _biquad_shelf(freq, gain_db, q, sr, "high"))
 
 
+def chain_sos(
+    hpf_hz: float = 0.0,
+    lpf_hz: float = 0.0,
+    bands: list[dict] | None = None,
+    sr: int = SAMPLE_RATE,
+) -> list[np.ndarray]:
+    """The filters of one EQ chain, in order: HPF -> LPF -> peaking/shelf bands.
+    apply_eq_chain runs them; eq_response draws them (the mixer's EQ curve), so
+    what the page shows is what the audio gets.
+
+    Each band dict: {"freq": Hz, "gain_db": dB, "q": Q, "type": peaking|low_shelf|high_shelf}
+    """
+    out = []
+    nyq = sr / 2.0 * 0.95
+    if hpf_hz and hpf_hz > 0:
+        out.append(butter(4, min(hpf_hz, nyq), btype="highpass", fs=sr, output="sos"))
+    if lpf_hz and lpf_hz > 0:
+        out.append(butter(4, min(lpf_hz, nyq), btype="lowpass", fs=sr, output="sos"))
+    for band in bands or []:
+        kind = band.get("type", "peaking")
+        f = float(band.get("freq", 1000.0))
+        g = float(band.get("gain_db", 0.0))
+        q = float(band.get("q", 1.0))
+        if abs(g) < 1e-3:
+            continue
+        if kind == "low_shelf":
+            out.append(_biquad_shelf(f, g, q, sr, "low"))
+        elif kind == "high_shelf":
+            out.append(_biquad_shelf(f, g, q, sr, "high"))
+        else:
+            out.append(_biquad_peaking(min(max(f, 10.0), nyq), g, q, sr))
+    return out
+
+
 def apply_eq_chain(
     audio: np.ndarray,
     hpf_hz: float = 0.0,
@@ -109,28 +143,30 @@ def apply_eq_chain(
     bands: list[dict] | None = None,
     sr: int = SAMPLE_RATE,
 ) -> np.ndarray:
-    """Run the full EQ chain for one stem: HPF -> LPF -> peaking/shelf bands.
-
-    Each band dict: {"freq": Hz, "gain_db": dB, "q": Q, "type": peaking|low_shelf|high_shelf}
-    """
+    """Run the full EQ chain for one stem (chain_sos)."""
     out = audio
-    if hpf_hz:
-        out = highpass(out, hpf_hz, sr)
-    if lpf_hz:
-        out = lowpass(out, lpf_hz, sr)
-
-    for band in bands or []:
-        kind = band.get("type", "peaking")
-        f = float(band.get("freq", 1000.0))
-        g = float(band.get("gain_db", 0.0))
-        q = float(band.get("q", 1.0))
-        if kind == "low_shelf":
-            out = low_shelf(out, f, g, q, sr)
-        elif kind == "high_shelf":
-            out = high_shelf(out, f, g, q, sr)
-        else:
-            out = peaking(out, f, g, q, sr)
+    for sos in chain_sos(hpf_hz, lpf_hz, bands, sr):
+        out = _apply_sos(out, sos)
     return out
+
+
+def eq_response(
+    hpf_hz: float = 0.0,
+    lpf_hz: float = 0.0,
+    bands: list[dict] | None = None,
+    sr: int = SAMPLE_RATE,
+    points: int = 200,
+) -> dict:
+    """The chain's frequency response, for drawing: {"freq": [Hz], "db": [dB]}
+    on a log scale from 20 Hz to 20 kHz."""
+    from scipy.signal import sosfreqz
+
+    freqs = np.geomspace(20.0, min(20_000.0, sr / 2.0 * 0.99), points)
+    db = np.zeros(points)
+    for sos in chain_sos(hpf_hz, lpf_hz, bands, sr):
+        _, h = sosfreqz(sos, worN=freqs, fs=sr)
+        db += 20.0 * np.log10(np.maximum(np.abs(h), 1e-6))
+    return {"freq": [round(float(f), 1) for f in freqs], "db": [round(float(d), 2) for d in db]}
 
 
 # --------------------------------------------------------------------------- #

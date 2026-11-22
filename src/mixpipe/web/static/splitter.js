@@ -50,12 +50,9 @@ function refreshSongs() {
 // =========================================================================
 // player
 // =========================================================================
-// A "set" is one <audio> per stem, kept in sync and mixed through Web Audio
-// gains. Each stem is fetched whole (compressed FLAC, ~12 MB for 4 minutes;
-// decoded AudioBuffers would be ~0.5 GB for six) and played from a blob URL:
-// six streaming <audio> elements would hold all six of the browser's
-// connections to the server and stall every other request. The first stem
-// is the clock; the others are nudged back when they drift.
+// The stems play through the shared player (stem-player.js): one <audio> per
+// stem, fetched whole as a blob, mixed through Web Audio gains, the first
+// stem the clock.
 //
 // Speed and key, two engines (P.engine):
 // - "browser" (Fast): the browser stretches the audio itself (playbackRate +
@@ -66,8 +63,6 @@ function refreshSongs() {
 // The browser can't change the key, so a key change always comes from the
 // server; with Fast it's made at 100% and the browser adds the speed on top.
 
-const DRIFT = 0.04;   // seconds a stem may wander from the clock before it's resynced
-const XFADE = 0.08;   // seconds of crossfade when swapping to another set
 const SPEED_MIN = 0.5, SPEED_MAX = 3, SPEED_STEP = 0.1;
 const KEY_MAX = 12;   // semitones (= frets) either way
 const POLL_MS = 700;
@@ -75,16 +70,15 @@ const POLL_PENDING_MS = 400;  // faster while the change isn't audible yet, for 
 const APPLIED_MS = 2000;      // how long "✓ applied" stays up
 const ENGINE_KEY = "mixpipe.splitter.engine";
 const P = {
-  ctx: null, master: null, song: null, set: null, playing: false, dragging: false,
-  speed: 1, semi: 0, engine: "rubberband", loop: { a: null, b: null, on: false }, raf: 0,
-  versionReq: 0, swapToken: 0, requestTimer: 0, pollTimer: 0,
+  song: null, dragging: false,
+  speed: 1, semi: 0, engine: "rubberband", loop: { a: null, b: null, on: false },
+  versionReq: 0, requestTimer: 0, pollTimer: 0,
   hq: { state: "idle", msg: "", progress: null },  // state: idle | pending | fast | fine | error
   keyPending: false, keyFlash: 0,
   tempo: null,          // the song's BPM as recorded, once the chord finder has analysed it
   analysis: null, analysisTimer: 0, heardTimer: 0, counting: false,
   takes: [],            // recordings kept with the song (splitter/takes.py), played like stems
   fxTimer: 0, fxError: "",
-  blobs: new Map(),     // url -> Promise<Blob>, so a new set reuses the stems it shares with the old
 };
 // mixer state, saved per song; fx = { stems: {name: {bass, treble, drive, chorus, reverb, echo}},
 // room: {size, decay}, echo: {sync, ms, repeats} } (see effects.py on the server)
@@ -95,37 +89,29 @@ const SH = { view: null, shift: 0, lyrics: false, timeline: [], chipNodes: new M
              activeChord: null, activeWord: null };
 const METRO = createMetronome();   // metronome.js
 
-const clock = () => P.set?.tracks[0]?.audio;
-// positions are in song time; a set made at 70% runs 1/0.7 times longer
-const now = () => (clock()?.currentTime || 0) * (P.set?.speed || 1);
 const rateFor = (set) => P.speed / set.speed;
+const PL = createStemPlayer({
+  rate: rateFor,
+  gain: (name) => effectiveGain(name),
+  onTick: tick,
+  onEnded: () => { pause(); seek(P.loop.on && P.loop.a != null ? P.loop.a : 0); },
+});
+// the player's state, under the names the rest of this page uses
+Object.defineProperties(P, {
+  set: { get: () => PL.set },
+  playing: { get: () => PL.playing },
+  ctx: { get: () => PL.ctx },
+  master: { get: () => PL.output },
+});
+const now = () => PL.now();
 
 function ensureContext() {
-  if (!P.ctx) {
-    P.ctx = new AudioContext();
-    P.master = P.ctx.createGain();
-    P.master.connect(P.ctx.destination);
-    P.master.gain.value = Number($("#master").value);
-    METRO.attach(P.ctx, P.master);
+  if (!PL.ctx) {
+    const ctx = PL.context();
+    PL.output.gain.value = Number($("#master").value);
+    METRO.attach(ctx, PL.output);
   }
-  return P.ctx;
-}
-
-function blobFor(url, label) {
-  if (!P.blobs.has(url)) {
-    P.blobs.set(url, fetch(apiUrl(url)).then((res) => {
-      if (!res.ok) throw new Error(`couldn't load ${label} (${res.status})`);
-      return res.blob();
-    }));
-    P.blobs.get(url).catch(() => P.blobs.delete(url));   // a failed fetch can be tried again
-  }
-  return P.blobs.get(url);
-}
-
-// keep only the stems the playing set (and the one being made) use
-function keepBlobs(...sets) {
-  const used = new Set(sets.flatMap((s) => (s ? Object.values(s.urls) : [])));
-  for (const url of P.blobs.keys()) if (!used.has(url)) P.blobs.delete(url);
+  return PL.ctx;
 }
 
 // every channel the player plays: the six stems, then your takes ("take:<n>")
@@ -156,59 +142,23 @@ async function makeSet(song, v) {
       version: v?.key ?? null, quality: v?.quality ?? null, settings: fxSettings(), tempo: P.tempo }));
     Object.assign(urls, res.stems);
   }
-  const chans = channels(song);
-  const blobs = await Promise.all(chans.map((c) => blobFor(urls[c.name], c.label)));
-  const ctx = ensureContext();
-  const set = { key: v?.key ?? null, quality: v?.quality ?? null, speed: v?.speed ?? 1,
-                semi: v?.semi ?? 0, bus: ctx.createGain(), tracks: [], urls, fxKey };
-  set.bus.connect(P.master);
-  set.tracks = chans.map((s, i) => {
-    const audio = new Audio();
-    audio.preload = "auto";
-    audio.preservesPitch = true;
-    audio.webkitPreservesPitch = true;
-    audio.src = URL.createObjectURL(blobs[i]);
-    audio.defaultPlaybackRate = audio.playbackRate = rateFor(set);
-    const gain = ctx.createGain();
-    gain.gain.value = effectiveGain(s.name);
-    ctx.createMediaElementSource(audio).connect(gain).connect(set.bus);
-    return { name: s.name, audio, gain };
-  });
-  set.tracks[0].audio.addEventListener("ended", () => {
-    if (set === P.set) { pause(); seek(P.loop.on && P.loop.a != null ? P.loop.a : 0); }
-  });
-  return set;
-}
-
-function dropSet(set) {
-  for (const t of set.tracks) {
-    t.audio.pause();
-    URL.revokeObjectURL(t.audio.src);
-    t.audio.removeAttribute("src");
-    t.audio.load();
-    t.gain.disconnect();
-  }
-  set.bus.disconnect();
+  ensureContext();
+  return PL.makeSet(channels(song).map((c) => ({ name: c.name, label: c.label, url: urls[c.name] })),
+    { key: v?.key ?? null, quality: v?.quality ?? null, speed: v?.speed ?? 1, semi: v?.semi ?? 0, fxKey });
 }
 
 function teardownPlayer() {
   pause();
   clearTimeout(P.fxTimer);
-  P.blobs.clear();
   clearTimeout(P.requestTimer);
   clearTimeout(P.pollTimer);
   P.versionReq++;
-  P.swapToken++;
-  if (P.set) dropSet(P.set);
-  P.set = null;
+  PL.teardown();
 }
 
 async function setupPlayer(song) {
   teardownPlayer();
-  const token = P.swapToken;
-  const set = await makeSet(song, null);
-  if (token !== P.swapToken || song !== P.song) { dropSet(set); return; }  // left meanwhile
-  P.set = set;
+  if (!await PL.load(() => makeSet(song, null), () => song === P.song)) return;  // left meanwhile
   applyGains(true);
   renderFx();
   if (P.semi !== 0 || (P.speed !== 1 && P.engine === "rubberband")) scheduleVersion(0);
@@ -221,10 +171,6 @@ function setDuration(d) {
   renderLoop();
 }
 
-const ready = (a) => a.readyState >= 3 || new Promise((r) => {
-  a.addEventListener("canplay", r, { once: true });
-});
-
 async function play({ countIn = true } = {}) {
   if (!P.set || P.counting) return;
   await ensureContext().resume();
@@ -235,26 +181,13 @@ async function play({ countIn = true } = {}) {
     try { await METRO.countIn(now(), P.speed); } finally { P.counting = false; }
     if (!P.set) return;
   }
-  const set = P.set;
-  const t = clock().currentTime;
-  for (const tr of set.tracks) tr.audio.currentTime = t;
-  await Promise.all(set.tracks.map((tr) => ready(tr.audio)));
-  if (set !== P.set) return;  // swapped meanwhile; that swap took over
-  await Promise.all(set.tracks.map((tr) => tr.audio.play()));
-  P.playing = true;
+  if (!await PL.play()) return;
   $("#play-btn").textContent = "❚❚";
   $("#play-btn").setAttribute("aria-label", "Pause");
-  cancelAnimationFrame(P.raf);
-  P.raf = requestAnimationFrame(tick);
 }
 
 function pause() {
-  P.playing = false;
-  cancelAnimationFrame(P.raf);
-  if (P.set) {
-    const t = clock().currentTime;
-    for (const tr of P.set.tracks) { tr.audio.pause(); tr.audio.currentTime = t; }
-  }
+  PL.pause();
   $("#play-btn").textContent = "▶";
   $("#play-btn").setAttribute("aria-label", "Play");
 }
@@ -262,7 +195,7 @@ function pause() {
 function seek(t) {
   const d = P.song?.duration;
   t = Math.max(0, Number.isFinite(d) ? Math.min(t, d - 0.05) : t);
-  if (P.set) for (const tr of P.set.tracks) tr.audio.currentTime = t / P.set.speed;
+  PL.seek(t);
   showTime(t);
 }
 
@@ -271,22 +204,17 @@ function showTime(t) {
   if (!P.dragging) $("#seek").value = t;
 }
 
-function tick() {
-  if (!P.playing || !P.set) return;
+// every frame while playing (after the player has resynced the stems)
+function tick(t) {
   const { a, b, on } = P.loop;
-  if (on && a != null && b != null && now() >= b && !REC.rec) {
+  if (on && a != null && b != null && t >= b && !REC.rec) {
     if ($("#count-in").checked && METRO.ready) { loopCountIn(a); return; }
     seek(a);
   } else {
-    const t = clock().currentTime;
-    for (const tr of P.set.tracks.slice(1)) {
-      if (!tr.audio.seeking && Math.abs(tr.audio.currentTime - t) > DRIFT) tr.audio.currentTime = t;
-    }
-    showTime(now());
+    showTime(t);
   }
   METRO.update(now(), P.speed, P.playing);
   followSheet(now());
-  P.raf = requestAnimationFrame(tick);
 }
 
 // a loop pass ended: back to A, a bar of clicks, then on
@@ -299,46 +227,12 @@ async function loopCountIn(a) {
 }
 
 // Swap to another set (a server version, or null = the original stems) without
-// a gap: the new set loads and lines up while the old one keeps playing, then
-// they crossfade.
+// a gap, crossfading (stem-player.js).
 async function swapTo(v) {
-  const token = ++P.swapToken;
   const song = P.song;
-  const next = await makeSet(song, v);
-  if (token !== P.swapToken || song !== P.song) { dropSet(next); return false; }
-  next.bus.gain.value = 0;
-  for (const tr of next.tracks) tr.audio.currentTime = now() / next.speed;
-  await Promise.all(next.tracks.map((tr) => ready(tr.audio)));
-  if (token !== P.swapToken || song !== P.song) { dropSet(next); return false; }
-  for (const tr of next.tracks) {
-    tr.audio.defaultPlaybackRate = tr.audio.playbackRate = rateFor(next);
-    tr.gain.gain.value = effectiveGain(tr.name);
-  }
-  const t = now() / next.speed;
-  for (const tr of next.tracks) tr.audio.currentTime = t;
-  const old = P.set;
-  if (P.playing) {
-    await Promise.all(next.tracks.map((tr) => tr.audio.play()));
-    if (token !== P.swapToken || !P.playing) {  // superseded or paused while starting
-      if (token !== P.swapToken) { dropSet(next); return false; }
-      for (const tr of next.tracks) tr.audio.pause();
-    }
-  }
-  P.set = next;
-  const at = P.ctx.currentTime;
-  if (P.playing) {
-    old.bus.gain.setValueAtTime(1, at);
-    old.bus.gain.linearRampToValueAtTime(0, at + XFADE);
-    next.bus.gain.setValueAtTime(0, at);
-    next.bus.gain.linearRampToValueAtTime(1, at + XFADE);
-    setTimeout(() => dropSet(old), XFADE * 1000 + 150);
-  } else {
-    next.bus.gain.value = 1;
-    dropSet(old);
-  }
-  keepBlobs(next);
-  renderFx();
-  return true;
+  const ok = await PL.swap(() => makeSet(song, v), () => song === P.song);
+  if (ok) renderFx();
+  return ok;
 }
 
 // ---- speed, key, engine ----------------------------------------------------
@@ -347,7 +241,7 @@ function setSpeed(speed) {
   speed = Math.round(Math.min(SPEED_MAX, Math.max(SPEED_MIN, speed)) * 10) / 10;  // 10% steps
   if (speed === P.speed) return renderSpeed();
   P.speed = speed;
-  if (P.set) for (const tr of P.set.tracks) tr.audio.defaultPlaybackRate = tr.audio.playbackRate = rateFor(P.set);
+  PL.applyRate();
   renderSpeed();
   renderAnalysis();
   saveMix();
@@ -517,11 +411,7 @@ function effectiveGain(name) {
 }
 
 function applyGains(instant = false) {
-  for (const tr of P.set?.tracks || []) {
-    const g = effectiveGain(tr.name);
-    if (instant || !P.ctx) tr.gain.gain.value = g;
-    else tr.gain.gain.setTargetAtTime(g, P.ctx.currentTime, 0.015);  // no clicks
-  }
+  PL.applyGains(instant);
   for (const strip of document.querySelectorAll(".strip")) {
     const name = strip.dataset.name;
     strip.classList.toggle("silent", effectiveGain(name) === 0);

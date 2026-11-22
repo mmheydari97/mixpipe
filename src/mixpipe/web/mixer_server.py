@@ -15,7 +15,9 @@ whether it is running.
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -85,7 +87,18 @@ def create_app(
     def get(sid: str) -> dict:
         if not _ID.match(sid) or sid not in sessions:
             raise HTTPException(404, "no such session")
-        return sessions[sid]
+        entry = sessions[sid]
+        if entry["state"] == "stored":            # from before a restart: read it back once
+            with entry["lock"]:
+                if entry["state"] == "stored":
+                    try:
+                        s = MixSession.restore(str(root / sid / "versions"), llm=llm,
+                                               **{"use_llm": use_llm, **(session_options or {})})
+                        s.editor = editor
+                        entry.update(session=s, state="ready")
+                    except Exception as exc:  # noqa: BLE001 - shown on the page
+                        entry.update(state="error", error=f"couldn't reopen it: {type(exc).__name__}: {exc}")
+        return entry
 
     def ready(sid: str) -> MixSession:
         entry = get(sid)
@@ -93,9 +106,34 @@ def create_app(
             raise HTTPException(409, f"session is {entry['state']}")
         return entry["session"]
 
+    # sessions saved by an earlier run: listed now, read back when opened
+    for idx in root.glob("*/versions/session.json"):
+        sid = idx.parent.parent.name
+        try:
+            info = json.loads(idx.read_text())
+        except ValueError:
+            continue
+        if not _ID.match(sid) or not info.get("versions"):
+            continue
+        meta = idx.parent.parent / "title.txt"
+        if meta.exists():
+            title = meta.read_text().strip()
+        else:                                  # made before titles were saved: from its stems
+            stems = Path(info.get("stems_dir") or "")
+            try:
+                title = songstore.read_meta(stems.parent).get("title") or stems.parent.name
+            except Exception:  # noqa: BLE001 - uploaded stems have no song folder
+                title = "Uploaded stems"
+        sessions[sid] = {"id": sid, "title": title,
+                         "state": "stored", "error": None, "created": idx.stat().st_mtime,
+                         "session": None, "stems_dir": info.get("stems_dir"), "lock": threading.Lock()}
+
     def start(sid: str, stems_dir: Path, title: str, notes: str, opts: dict) -> None:
         entry = {"id": sid, "title": title, "state": "queued", "error": None,
-                 "created": time.time(), "session": None, "stems_dir": str(stems_dir)}
+                 "created": time.time(), "session": None, "stems_dir": str(stems_dir),
+                 "lock": threading.Lock()}
+        (root / sid).mkdir(parents=True, exist_ok=True)
+        (root / sid / "title.txt").write_text(title)
         with lock:
             sessions[sid] = entry
 
@@ -270,6 +308,48 @@ def create_app(
         v = s.set_params(body.adjustments, body.label)
         return {"turn": s.summary(v) if v else None, **state(sid)}
 
+    # ---- the console: channels played live in the page (session.console) ----------
+
+    @app.get("/api/sessions/{sid}/console")
+    def console(sid: str, n: int | None = None):
+        """Every channel through its chain, whole song, plus the FX return; slow the
+        first time (each channel is processed), cached after."""
+        try:
+            return ready(sid).console(n)
+        except KeyError:
+            raise HTTPException(404, "no such version")
+
+    @app.get("/api/sessions/{sid}/console/files/{name}")
+    def console_file(sid: str, name: str):
+        s = ready(sid)
+        if not re.fullmatch(r"[\w.-]+\.(flac|wav)", name):
+            raise HTTPException(404, "no such file")
+        for folder in (s.out_dir / "console", s.out_dir):
+            if (folder / name).exists():
+                kind = "audio/flac" if name.endswith(".flac") else "audio/wav"
+                return FileResponse(folder / name, media_type=kind,
+                                    headers={"Cache-Control": "max-age=31536000, immutable"})
+        raise HTTPException(404, "no such file")
+
+    @app.get("/api/sessions/{sid}/peaks")
+    def peaks(sid: str):
+        return ready(sid).peaks()
+
+    @app.get("/api/sessions/{sid}/eq-curve")
+    def eq_curve(sid: str, target: str, n: int | None = None):
+        try:
+            return ready(sid).eq_curve(target, n)
+        except KeyError:
+            raise HTTPException(404, "no such channel or version")
+
+    @app.post("/api/sessions/{sid}/master")
+    def master_render(sid: str, n: int | None = None):
+        """The whole song mixed and mastered (cached per version) and its numbers."""
+        try:
+            return ready(sid).render_master(n)
+        except KeyError:
+            raise HTTPException(404, "no such version")
+
     @app.get("/api/ai-edit/status")
     def ai_edit_status():
         if editor is not None:
@@ -344,9 +424,12 @@ def create_app(
 
     @app.delete("/api/sessions/{sid}")
     def delete(sid: str):
+        """Forget a session and its renders (out/mixer/<id>/; a splitter song's
+        stems stay where they are), so it doesn't come back after a restart."""
         get(sid)
         with lock:
             sessions.pop(sid, None)
+        shutil.rmtree(root / sid, ignore_errors=True)
         return {"ok": True}
 
     add_openrouter_routes(app)

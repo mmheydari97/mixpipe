@@ -11,6 +11,8 @@ Each song lives in out/chords/<song_id>/ (folder layout and ids: songstore.py):
   revision.json    the LLM's whole-lyric revision (optional), keyed by model + transcript text
   chords.json      cached, keyed by RECOGNIZER_VERSION
   melody.json      cached melody notes for the harmonica tab, keyed by MELODY_VERSION
+  guitar.json      cached guitar notes for the guitar tab, keyed by guitar.GUITAR_VERSION
+  stems/           the six-stem split, made on demand (stems6.py)
   sheet.json       the editable result (see sheet.py)
   status.json      job state, for the UI to poll
 
@@ -37,6 +39,7 @@ from .syllables import ENV_HOP, loudness_envelope
 DEFAULT_ROOT = Path("out/chords")
 RECOGNIZER_VERSION = 5
 MELODY_VERSION = 2
+GUITAR_STATUS = "guitar-status.json"   # the guitar tab's job (its own, like the stem split's)
 STAGES = ("download", "decode", "separate", "transcribe", "chords", "melody", "align")
 BROWSER_PLAYABLE = {".mp3", ".m4a", ".aac", ".mp4", ".wav", ".flac", ".ogg", ".opus", ".webm"}
 
@@ -411,6 +414,46 @@ def run_melody_job(song_dir: Path, lock=None, extractor: Callable | None = None,
     return songstore.run_job(song_dir, work, done_stage="melody", cancelled=cancelled)
 
 
-__all__ = ["DEFAULT_ROOT", "STAGES", "analyze", "run_job", "run_melody_job", "new_song",
+def run_guitar_job(song_dir: Path, splitter_root: Path | None = None, lock=None,
+                   transcriber: Callable | None = None, separator: Callable | None = None,
+                   cancelled: Callable | None = None, force: bool = False) -> dict | None:
+    """The guitar tab of an analysed song: the six-stem split when it isn't
+    there yet (stems6), the guitar stem's notes (cached in guitar.json), stored
+    in sheet["guitar"]; a lock on the solo guitar is kept. Its own status file
+    (GUITAR_STATUS). Never raises."""
+    import contextlib
+
+    import soundfile as sf
+
+    from . import stems6
+    from .guitar import GUITAR_VERSION, from_transcription
+    from .guitar_transcribe import transcribe
+
+    song_dir = Path(song_dir)
+
+    def work(report):
+        stems = stems6.ensure(song_dir, splitter_root, report, separator)
+        path = song_dir / "guitar.json"
+        cached = json.loads(path.read_text()) if path.exists() and not force else None
+        if cached and cached.get("version") == GUITAR_VERSION:
+            report("transcribe", 1.0, "using the notes found before")
+            found = cached["notes"]
+        else:
+            report("transcribe", 0.0, "reading the guitar stem")
+            y, sr = sf.read(str(stems["guitar"]), dtype="float32", always_2d=True)
+            found = transcribe(y, sr, transcriber,
+                               progress=lambda f, msg: report("transcribe", f, msg))
+            _write_json(path, {"version": GUITAR_VERSION, "notes": found})
+        with lock or contextlib.nullcontext():
+            sheet = load_sheet(song_dir / "sheet.json")
+            sheet["guitar"] = from_transcription(found, sheet.get("guitar"))
+            save_sheet(sheet, song_dir / "sheet.json")
+        return sheet
+
+    return songstore.run_job(song_dir, work, done_stage="transcribe", cancelled=cancelled,
+                             status_file=GUITAR_STATUS)
+
+
+__all__ = ["DEFAULT_ROOT", "STAGES", "analyze", "run_job", "run_melody_job", "run_guitar_job", "new_song",
            "new_song_from_url", "list_songs", "get_status", "set_status", "playback_file", "openrouter_caps",
            "load_sheet", "save_sheet", "WORK_SR"]

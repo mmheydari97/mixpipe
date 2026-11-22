@@ -33,7 +33,8 @@ def create_app(
     from . import mixer_server, server, splitter_server, tuner_server
 
     app = FastAPI(title="mixpipe")
-    chords = server.create_app(chords_root, workers=workers, **(chords_options or {}))
+    chords = server.create_app(chords_root, workers=workers, splitter_root=splitter_root,
+                               **(chords_options or {}))
     # the splitter's key, beats and chords come from the chord finder: same store, same queue
     splitter = splitter_server.create_app(splitter_root, workers=workers, chords_root=chords_root,
                                           chords_service=chords.state.songs, **(splitter_options or {}))

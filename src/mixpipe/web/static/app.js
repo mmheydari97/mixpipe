@@ -200,7 +200,7 @@ function initLibrary() {
 
 const S = {
   song: null,
-  tab: "guitar",       // "guitar" | "harmonica" (harmonica.js)
+  tab: "guitar",       // "guitar" (chords) | "harmonica" (harmonica.js) | "solo" (guitar.js)
   chords: new Map(),   // id -> chord
   timeline: [],        // visible chords sorted by start
   words: [],           // [{start, end, node}]
@@ -308,6 +308,7 @@ function renderSong() {
   $("#export-harp").href = apiUrl(`/api/songs/${song.id}/export?fmt=harp`);
   $("#tab-guitar").href = `#/song/${song.id}`;
   $("#tab-harmonica").href = `#/song/${song.id}/harmonica`;
+  $("#tab-solo").href = `#/song/${song.id}/solo`;
 
   renderArrangement();
   const sheet = $("#sheet");
@@ -322,17 +323,21 @@ function renderSong() {
 
 function setTab(tab) {
   S.tab = tab;
-  const guitar = tab === "guitar";
+  const guitar = tab === "guitar", harp = tab === "harmonica", solo = tab === "solo";
   $("#tab-guitar").setAttribute("aria-selected", String(guitar));
-  $("#tab-harmonica").setAttribute("aria-selected", String(!guitar));
+  $("#tab-harmonica").setAttribute("aria-selected", String(harp));
+  $("#tab-solo").setAttribute("aria-selected", String(solo));
   $("#sheet").hidden = !guitar;
-  $("#harp-panel").hidden = guitar;
-  $("#capo-group").hidden = !guitar;
-  $("#instrument-group").hidden = !guitar;
-  $("#octave-group").hidden = guitar || !S.song?.harmonica;
-  $("#harp-group").hidden = guitar || !S.song?.harmonica;
+  $("#harp-panel").hidden = !harp;
+  $("#solo-panel").hidden = !solo;
+  $("#capo-group").hidden = harp;
+  $("#instrument-group").hidden = harp;
+  $("#octave-group").hidden = !harp || !S.song?.harmonica;
+  $("#harp-group").hidden = !harp || !S.song?.harmonica;
   $("#export-cho").hidden = $("#export-txt").hidden = !guitar;
-  $("#export-harp").hidden = guitar;
+  $("#export-harp").hidden = !harp;
+  $("#export-tab").hidden = !solo || !S.song?.has_guitar;
+  if (solo) openSolo();
   closeChordMenu();
   S.activeChord = S.activeWord = null;
   document.querySelectorAll(".chip.active, .word.active").forEach((n) => n.classList.remove("active"));
@@ -372,6 +377,7 @@ async function openSong(id, tab = "guitar") {
     audio.dataset.src = src;
   }
   $("#player").hidden = !S.song.audio;
+  if (S.song.audio) openPlayalong(id);
 }
 
 function seekPlay(t) {
@@ -386,6 +392,7 @@ function tick() {
   if (!S.song) return;
   const t = audio.currentTime;
   if (S.tab === "harmonica") { harpTick(t); return; }
+  if (S.tab === "solo") { soloTick(t); return; }
   const { cur, next } = followChord(S.timeline, S.chipNodes, t, S);
   $("#now-chord").textContent = cur ? displayOf(cur) : "–";
   $("#next-chord").textContent = next ? `${displayOf(next)} in ${Math.max(0, next.start - t).toFixed(1)}s` : "–";
@@ -654,17 +661,18 @@ function alertInline(container, msg) {
 // =========================================================================
 
 function route() {
-  const m = /^#\/song\/([^/?#]+)(\/harmonica)?/.exec(location.hash);
+  const m = /^#\/song\/([^/?#]+)(\/harmonica|\/solo)?/.exec(location.hash);
   stopAudition();
   if (m) {
     $("#library-view").hidden = true;
     $("#song-view").hidden = false;
-    openSong(decodeURIComponent(m[1]), m[2] ? "harmonica" : "guitar");
+    openSong(decodeURIComponent(m[1]), m[2] === "/harmonica" ? "harmonica" : m[2] === "/solo" ? "solo" : "guitar");
   } else {
     $("#song-view").hidden = true;
     $("#library-view").hidden = false;
     $("#player").hidden = true;
     audio.pause();
+    closePlayalong();
     S.song = null;
     refreshSongs();
   }

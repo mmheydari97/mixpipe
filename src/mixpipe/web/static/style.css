@@ -107,9 +107,33 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
   padding: 10px 16px; background: var(--surface); border-top: 1px solid var(--border);
 }
 .player audio { flex: 1; min-width: 0; height: 40px; }
+.mutes { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; max-width: 420px; }
+.mutes label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.mutes label.down { color: var(--text); font-weight: 600; }
+.mutes input[type=range] { width: 90px; }
+.mutes output { min-width: 3.2em; font-variant-numeric: tabular-nums; font-size: 12px; }
+.pa-msg { flex-basis: 100%; color: var(--muted); }
+.pa-msg.error { color: var(--danger); }
 @media (max-width: 640px) {
   .player { flex-direction: column; align-items: stretch; gap: 6px; }
   .player audio { flex: none; width: 100%; }
   body { padding-bottom: 130px; }
   select { min-width: 0; width: 100%; }
 }
+
+/* ---------- guitar notes (guitar.js) ---------- */
+.seg-buttons { display: inline-flex; }
+.seg-buttons button { border-radius: 0; margin-left: -1px; }
+.seg-buttons button:first-child { border-radius: 6px 0 0 6px; }
+.seg-buttons button:last-child { border-radius: 0 6px 6px 0; }
+.seg-buttons button[aria-pressed=true], #solo-hear[aria-pressed=true] { background: var(--accent, #3b6); color: #fff; }
+.solo-sheet { margin-top: 8px; }
+.solo-sheet .seg { margin: 10px 0 18px; }
+.solo-sheet .seg.sung .seg-head { color: var(--muted); }
+.solo-sheet .seg-head { font-size: 13px; margin-bottom: 2px; }
+.solo-row { overflow-x: auto; }
+.solo-row svg { display: block; max-width: 100%; height: auto; }
+.solo-sheet .gnote { cursor: pointer; }
+.solo-sheet .gnote:hover { opacity: .7; }
+.solo-sheet .gnote.playing, .solo-sheet .gnote.playing path, .solo-sheet .gnote.playing text { fill: var(--accent, #2a7) !important; color: var(--accent, #2a7); }
+#solo-lock { margin: 6px 0; }

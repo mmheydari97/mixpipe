@@ -239,28 +239,8 @@ async function editNotes(body) {
   }
 }
 
-// add a note the tracker missed: starts at the playhead, lasts until the next note (max 1 s)
 function openAddNote(anchor) {
-  const key = "add-note";
-  if (S.menuFor === key && !$("#chord-menu").hidden) { closeChordMenu(); return; }
-  closeChordMenu();
-  const start = Math.round(audio.currentTime * 100) / 100;
-  const later = [...H.notes.values()].filter((n) => n.start > start + 0.05).sort((a, b) => a.start - b.start)[0];
-  const end = Math.round(Math.min(start + 1, later ? later.start - 0.02 : start + 1) * 100) / 100;
-  const input = el("input", { type: "text", placeholder: "Note, e.g. C5, F# or Bb" });
-  const apply = () => {
-    const note = input.value.trim();
-    if (!note) return;
-    closeChordMenu();
-    editNotes({ action: "add", start, end, note });
-  };
-  input.addEventListener("keydown", (e) => { if (e.key === "Enter") apply(); if (e.key === "Escape") closeChordMenu(); });
-  showMenu([
-    el("div", { class: "head" }, el("span", {}, `New note at ${fmtTime(start)}`), el("span", {}, `${(end - start).toFixed(2)} s`)),
-    el("div", { class: "custom-row" }, input, el("button", { onclick: apply }, "Add")),
-    el("div", { class: "hint" }, "Move the playhead to where the note starts first. No octave = the nearest one."),
-  ], anchor, key);
-  input.focus();
+  openAddNoteMenu(anchor, [...H.notes.values()], "Note, e.g. C5, F# or Bb", (body) => editNotes({ action: "add", ...body }));
 }
 
 function auditionNote(n, sungMidi) {
@@ -273,84 +253,48 @@ function openNoteMenu(id, anchor) {
   if (S.menuFor === key && !$("#chord-menu").hidden) { closeChordMenu(); return; }
   closeChordMenu();
   const n = H.notes.get(id);
-  const rows = [el("div", { class: "head" },
-    el("span", {}, `${fmtTime(n.start)} – ${fmtTime(n.end)}`),
-    el("span", {}, n.source === "instr" ? "from the instruments (rough)" : "sung"))];
-
-  n.candidates.forEach((c, i) => {
-    const isSel = !n.custom && (n.selected || 0) === i;
-    rows.push(el("div", { class: "cand" + (isSel ? " sel" : ""), role: "menuitemradio", "aria-checked": String(isSel) },
-      el("button", { class: "pick", onclick: () => { closeChordMenu(); saveNote(id, { selected: i }); } },
-        `${isSel ? "✓ " : ""}${c.name}`, el("span", { class: "tab" + (c.in_range ? "" : " oor") }, c.tab || "out of range")),
-      el("div", { class: "conf", title: `${Math.round(c.conf * 100)}% relative confidence` },
-        el("div", { style: `width:${Math.round(c.conf * 100)}%` })),
-      el("button", { class: "play", title: "Play this part of the song with this note on top",
-        onclick: () => auditionNote(n, c.midi) }, "▶ hear")));
-  });
-
+  const rows = [];
   if (!n.rest && n.fingerings.length > 1) {
-    rows.push(el("div", { class: "fingering-row" },
-      el("span", { class: "lbl" }, "Play as"),
-      n.fingerings.map((f, i) => el("button", {
-        class: i === n.fingering_index ? "on" : "",
+    rows.push({ label: "Play as", auto: n.fingering != null ? () => saveNote(id, { auto_fingering: true }) : null,
+      buttons: n.fingerings.map((f, i) => ({
+        text: f.tab, on: i === n.fingering_index,
         title: `Hole ${f.hole}, ${f.breath}${f.bend ? `, bend ${f.bend} semitone${f.bend > 1 ? "s" : ""}` : ""}${f.button ? ", button in" : ""}`,
-        "aria-pressed": String(i === n.fingering_index),
-        onclick: () => { closeChordMenu(); saveNote(id, { fingering: i }); },
-      }, f.tab)),
-      n.fingering != null
-        ? el("button", { class: "link", onclick: () => { closeChordMenu(); saveNote(id, { auto_fingering: true }); } }, "auto")
-        : null));
+        onclick: () => saveNote(id, { fingering: i }) })) });
   }
   if (!n.rest) {
     const main = isMain(n);
-    rows.push(el("div", { class: "fingering-row" },
-      el("span", { class: "lbl", title: "Hold a main note until the next one, or play the passing notes in between" }, "Role"),
-      el("button", { class: main ? "on" : "", "aria-pressed": String(main),
-        title: "A main note on every beat and strong beat: hold it until the next main note",
-        onclick: () => { closeChordMenu(); saveNote(id, { main: true }); } }, "★ Main note"),
-      el("button", { class: main ? "" : "on", "aria-pressed": String(!main),
-        title: "A note between the main ones: add it for nuance, or skip it",
-        onclick: () => { closeChordMenu(); saveNote(id, { main: false }); } }, "Passing note"),
-      n.main_pinned
-        ? el("button", { class: "link", onclick: () => { closeChordMenu(); saveNote(id, { auto_main: true }); } }, "auto")
-        : null));
+    rows.push({ label: "Role", title: "Hold a main note until the next one, or play the passing notes in between",
+      auto: n.main_pinned ? () => saveNote(id, { auto_main: true }) : null,
+      buttons: [
+        { text: "★ Main note", on: main, title: "A main note on every beat and strong beat: hold it until the next main note",
+          onclick: () => saveNote(id, { main: true }) },
+        { text: "Passing note", on: !main, title: "A note between the main ones: add it for nuance, or skip it",
+          onclick: () => saveNote(id, { main: false }) }] });
   }
-  if (!n.rest && !n.in_range) {
-    rows.push(el("div", { class: "hint warn" },
-      `${n.name} is outside the harmonica (${S.song.harmonica.range.join("–")}). Try Octave − / + or type another note.`));
-  }
-
-  const customInput = el("input", { type: "text", placeholder: "Other note, e.g. F#5 or Bb",
-    value: n.custom && !n.rest ? n.name.replace("♯", "#").replace("♭", "b") : "" });
-  const applyCustom = () => { closeChordMenu(); saveNote(id, { custom: customInput.value.trim() }); };
-  customInput.addEventListener("keydown", (e) => { if (e.key === "Enter") applyCustom(); if (e.key === "Escape") closeChordMenu(); });
-  rows.push(el("div", { class: "custom-row" }, customInput, el("button", { onclick: applyCustom }, "Set")));
-  rows.push(el("div", { class: "hint" }, "No octave = the nearest one. Empty + Set reverts to the detected notes."));
-  rows.push(el("div", { class: "foot" },
-    el("button", { onclick: () => auditionNote(n, null) }, "▶ Section only"),
-    el("button", { onclick: () => auditionNote(n, n.sung) }, "▶ With current"),
-    el("button", { onclick: stopAudition }, "■ Stop")));
   const sorted = [...H.notes.values()].sort((a, b) => a.start - b.start);
   const next = sorted[sorted.findIndex((x) => x.id === id) + 1];
-  const t = audio.currentTime;
-  const splitAt = t > n.start + 0.05 && t < n.end - 0.05 ? t : null;
-  rows.push(el("div", { class: "foot" },
-    el("button", {
-      title: splitAt ? "Cut this note in two at the playhead" : "Cut this note in two in the middle (or move the playhead inside it first)",
-      disabled: n.end - n.start < 0.12,
-      onclick: () => { closeChordMenu(); editNotes({ action: "split", id, at: splitAt }); },
-    }, splitAt ? "✂ Split at playhead" : "✂ Split in half"),
-    el("button", {
-      title: "Join this note and the next into one",
-      disabled: !next,
-      onclick: () => { closeChordMenu(); editNotes({ action: "merge", ids: [id, next.id] }); },
-    }, "⇥ Merge with next")));
-  rows.push(el("div", { class: "foot" },
-    n.rest
-      ? el("button", { onclick: () => { closeChordMenu(); saveNote(id, { custom: "" }); } }, "↺ Restore note")
-      : el("button", { onclick: () => { closeChordMenu(); saveNote(id, { custom: "rest" }); } }, "✕ Not a note")));
-
-  showMenu(rows, anchor, key);
+  const splitAt = splitPoint(n);
+  showMenu(noteMenuRows({
+    head: [`${fmtTime(n.start)} – ${fmtTime(n.end)}`, n.source === "instr" ? "from the instruments (rough)" : "sung"],
+    cands: n.candidates.map((c, i) => ({ name: c.name, extra: c.tab || "out of range", extraClass: c.in_range ? "" : "oor",
+      conf: c.conf, selected: !n.custom && (n.selected || 0) === i })),
+    onPick: (i) => saveNote(id, { selected: i }),
+    onHear: (i) => auditionNote(n, n.candidates[i].midi),
+    rows,
+    hints: !n.rest && !n.in_range ? [{ warn: true,
+      text: `${n.name} is outside the harmonica (${S.song.harmonica.range.join("–")}). Try Octave − / + or type another note.` }] : [],
+    custom: { placeholder: "Other note, e.g. F#5 or Bb", value: n.custom && !n.rest ? n.name.replace("♯", "#").replace("♭", "b") : "",
+      onSet: (text) => saveNote(id, { custom: text }) },
+    listen: [
+      { text: "▶ Section only", onclick: () => auditionNote(n, null) },
+      { text: "▶ With current", onclick: () => auditionNote(n, n.sung) },
+      { text: "■ Stop", onclick: stopAudition }],
+    split: { at: splitAt, disabled: n.end - n.start < 0.12, onclick: () => editNotes({ action: "split", id, at: splitAt }) },
+    merge: { disabled: !next, onclick: () => editNotes({ action: "merge", ids: [id, next.id] }) },
+    rest: n.rest,
+    onRemove: () => saveNote(id, { custom: "rest" }),
+    onRestore: () => saveNote(id, { custom: "" }),
+  }), anchor, key);
 }
 
 // ---- melody job + octave -----------------------------------------------------------

@@ -46,10 +46,11 @@ from __future__ import annotations
 
 import bisect
 import math
-import re
 from dataclasses import dataclass
 
+from . import notes as notes_mod
 from .align import BarGrid, _visible, build_rows, chord_label, grid_for
+from .notes import REST, nearest_octave, note_midi, parse_note, pretty  # noqa: F401 (re-exported)
 from .syllables import make_syllabifier
 from .theory import (NEUTRAL, chord_pcs, key_label, key_names, note_label, note_pc, parse_key,
                      transpose_label)
@@ -58,14 +59,10 @@ HOLES = 12
 LOWEST = 60            # C4, hole 1 blow
 BLOW = (0, 4, 7, 12)   # semitones above the block's C, per position in the block
 DRAW = (2, 5, 9, 11)
-REST = "rest"          # a note's custom label when the user removed it
 MAX_OCTAVE = 3
 NOTES_PER_ROW = 12     # notes per instrumental row when there are no bars
 CHORD_HOLES = (2, 3, 4)  # widths of the hole runs tried for a chord
 
-_NOTE = re.compile(r"^\s*([A-Ga-g])([#b♯♭]?)\s*(-?\d)?\s*$")
-_NATURAL = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
-_ACC = {"": 0, "#": 1, "♯": 1, "b": -1, "♭": -1}
 
 # ---- the Richter diatonic layout, semitones above C4 -------------------------
 DIATONIC_BLOW = (0, 4, 7, 12, 16, 19, 24, 28, 31, 36)
@@ -265,38 +262,6 @@ def fit_octave(notes: list[tuple[int, float]], instrument: Instrument | None = N
 # --------------------------------------------------------------------------- #
 
 
-def pretty(name: str) -> str:
-    """"Bb" -> "B♭", "F#" -> "F♯"."""
-    return name.replace("#", "♯").replace("b", "♭") if len(name) > 1 else name
-
-
-def parse_note(text: str) -> tuple[int, int | None] | None:
-    """"Bb4" -> (70, 4); "f#" -> (6, None): the MIDI number when an octave is
-    given, else the pitch class. None if it isn't a note name."""
-    m = _NOTE.match(text or "")
-    if not m:
-        return None
-    semis = _NATURAL[m.group(1).upper()] + _ACC[m.group(2)]
-    if m.group(3) is None:
-        return semis % 12, None
-    octave = int(m.group(3))
-    return 12 * (octave + 1) + semis, octave
-
-
-def note_midi(note: dict) -> int | None:
-    """Sung pitch of a note as the user currently sees it; None for a rest."""
-    label = chord_label(note)
-    if label == REST:
-        return None
-    if note.get("custom"):
-        parsed = parse_note(label)
-        return parsed[0] if parsed and parsed[1] is not None else None
-    cands = note.get("candidates") or []
-    if not cands:
-        return None
-    return cands[min(max(note.get("selected", 0) or 0, 0), len(cands) - 1)]["midi"]
-
-
 # --------------------------------------------------------------------------- #
 # sheet integration
 # --------------------------------------------------------------------------- #
@@ -351,7 +316,7 @@ def note_from_display(text: str, sheet: dict, note: dict) -> str | None:
         if ref is None:
             ref = note["candidates"][0]["midi"] if note.get("candidates") else instrument_of(sheet).lowest + 12
         ref += shift
-        value = min((value + 12 * k for k in range(0, 11)), key=lambda m: (abs(m - ref), m))
+        value = nearest_octave(value, ref)
     return note_label(value - shift)
 
 
@@ -378,10 +343,6 @@ def set_main(note: dict, value: bool | None) -> None:
 # editing the note list
 # --------------------------------------------------------------------------- #
 
-MIN_NOTE_S = 0.05      # edits may not make a note shorter than this
-OVERLAP_S = 0.02       # a new note may overlap a neighbour by this much
-
-
 def _notes(sheet: dict) -> list[dict]:
     mel = _melody(sheet)
     if mel is None:
@@ -389,59 +350,18 @@ def _notes(sheet: dict) -> list[dict]:
     return mel["notes"]
 
 
-def _new_id(notes: list[dict]) -> str:
-    used = [int(n["id"][1:]) for n in notes if re.fullmatch(r"n\d+", n.get("id", ""))]
-    return f"n{max(used, default=-1) + 1}"
-
-
-def _find(notes: list[dict], note_id: str) -> dict:
-    note = next((n for n in notes if n["id"] == note_id), None)
-    if note is None:
-        raise ValueError("no such note")
-    return note
-
-
 def split_note(sheet: dict, note_id: str, at: float | None = None) -> str:
-    """Cut a note in two at time `at` (default: its middle), e.g. a repeated
-    pitch the tracker held as one note. Both halves keep the pitch choice;
-    returns the id of the second half. Raises ValueError."""
-    notes = _notes(sheet)
-    note = _find(notes, note_id)
-    at = 0.5 * (note["start"] + note["end"]) if at is None else float(at)
-    if not note["start"] + MIN_NOTE_S <= at <= note["end"] - MIN_NOTE_S:
-        raise ValueError(f"a note can only be split inside itself, leaving at least "
-                         f"{MIN_NOTE_S * 1000:.0f} ms on each side")
-    second = {**{k: (list(v) if isinstance(v, list) else v) for k, v in note.items()},
-              "id": _new_id(notes), "start": round(at, 3), "fingering": None, "main": None}
-    second["candidates"] = [dict(c) for c in note.get("candidates", [])]
-    note["end"] = round(at, 3)
-    note["fingering"] = None
-    notes.append(second)
-    notes.sort(key=lambda n: n["start"])
-    return second["id"]
+    """Cut a melody note in two (notes.split); returns the second half's id."""
+    return notes_mod.split(_notes(sheet), note_id, at, reset=("fingering", "main"))
 
 
 def merge_notes(sheet: dict, note_ids: list[str]) -> str:
-    """Join neighbouring notes into one (a note the tracker split in two, or
-    a trill to smooth out). The longest of them decides the pitch. Returns the
-    id of the first. Raises ValueError."""
-    notes = sorted(_notes(sheet), key=lambda n: n["start"])
-    chosen = [_find(notes, i) for i in dict.fromkeys(note_ids)]
-    if len(chosen) < 2:
-        raise ValueError("pick at least two notes to merge")
-    chosen.sort(key=lambda n: n["start"])
-    idx = [notes.index(n) for n in chosen]
-    if idx != list(range(idx[0], idx[0] + len(idx))):
-        raise ValueError("only neighbouring notes can be merged")
-    keeper = max(chosen, key=lambda n: n["end"] - n["start"])
-    first = chosen[0]
-    merged = {**{k: v for k, v in keeper.items()}, "id": first["id"],
-              "start": first["start"], "end": chosen[-1]["end"], "fingering": None, "main": None}
-    drop = {n["id"] for n in chosen}
+    """Join neighbouring melody notes (notes.merge); returns the merged note's id."""
     mel = _melody(sheet)
-    mel["notes"] = [n for n in mel["notes"] if n["id"] not in drop] + [merged]
-    mel["notes"].sort(key=lambda n: n["start"])
-    return merged["id"]
+    if mel is None:
+        raise ValueError("this song has no melody yet")
+    mel["notes"], merged = notes_mod.merge(mel["notes"], note_ids, reset=("fingering", "main"))
+    return merged
 
 
 def add_note(sheet: dict, start: float, end: float, text: str) -> str:
@@ -449,14 +369,6 @@ def add_note(sheet: dict, start: float, end: float, text: str) -> str:
     ("C5", "Bb"; no octave = the one nearest the melody). Returns its id.
     Raises ValueError."""
     notes = _notes(sheet)
-    start, end = round(float(start), 3), round(float(end), 3)
-    if end - start < MIN_NOTE_S:
-        raise ValueError(f"a note must last at least {MIN_NOTE_S * 1000:.0f} ms")
-    if start < 0:
-        raise ValueError("a note can't start before the song does")
-    for n in notes:
-        if note_midi(n) is not None and start < n["end"] - OVERLAP_S and end > n["start"] + OVERLAP_S:
-            raise ValueError(f"that overlaps the note at {n['start']:.1f} s")
     probe = {"id": "probe", "start": start, "end": end, "candidates": [], "selected": 0,
              "custom": None}
     near = [n for n in notes if note_midi(n) is not None]
@@ -464,15 +376,9 @@ def add_note(sheet: dict, start: float, end: float, text: str) -> str:
         ref = min(near, key=lambda n: abs(n["start"] - start))
         probe["candidates"] = ref["candidates"]
     label = note_from_display(text, sheet, probe)
-    parsed = parse_note(label) if label else None
-    if label == REST or parsed is None or parsed[1] is None:
+    if label == REST:
         raise ValueError(f"{text!r} isn't a note name (try C, F#, Bb4)")
-    note = {"id": _new_id(notes), "start": start, "end": end, "selected": 0, "custom": None,
-            "fingering": None, "main": None, "source": "user",
-            "candidates": [{"label": label, "midi": parsed[0], "conf": 1.0}]}
-    notes.append(note)
-    notes.sort(key=lambda n: n["start"])
-    return note["id"]
+    return notes_mod.add(notes, start, end, label, monophonic=True, main=None)
 
 
 def position_name(sheet: dict, instrument: Instrument) -> str | None:

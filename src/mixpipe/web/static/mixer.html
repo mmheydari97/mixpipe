@@ -58,37 +58,101 @@
 
     <!-- ================= session ================= -->
     <section id="session-view" hidden>
-      <div class="song-head">
-        <a href="#/" class="back">← New mix</a>
+      <div class="song-head mix-head">
+        <a href="#/" class="back">← Sessions</a>
         <h1 id="session-title"></h1>
         <p id="session-badges" class="badges"></p>
       </div>
 
       <div id="session-progress"></div>
 
-      <div id="session" class="session-grid" hidden>
-        <div class="col-main">
-          <div class="card player">
-            <div class="card-head">
-              <h2>Listen</h2>
-              <label class="check small"><input type="checkbox" id="match-loudness" checked> Loudness-matched</label>
-            </div>
-            <div class="ab">
-              <button id="play-btn" class="primary" aria-label="Play">▶</button>
-              <div class="ab-switch" role="group" aria-label="Compare">
-                <button id="ab-a" class="on" aria-pressed="true">A <span id="ab-a-label"></span></button>
-                <button id="ab-b" aria-pressed="false">B <span id="ab-b-label"></span></button>
-              </div>
-              <select id="ab-b-select" aria-label="Version B"></select>
-            </div>
-            <input type="range" id="seek" min="0" max="1000" value="0" aria-label="Position">
-            <div class="time"><span id="t-now">0:00</span><span id="t-total">0:00</span></div>
-            <div id="output-stats" class="stats"></div>
-            <audio id="audio-a" preload="auto"></audio>
-            <audio id="audio-b" preload="auto"></audio>
+      <div id="session" hidden>
+        <div class="mix-bar">
+          <nav class="mix-tabs" role="tablist" aria-label="Stage">
+            <button role="tab" id="tab-mix" aria-selected="true">Mix</button>
+            <button role="tab" id="tab-master" aria-selected="false">Master</button>
+          </nav>
+          <div class="btn-row">
+            <button id="undo-btn" title="Back to the version this one came from">↶ Undo</button>
+            <button id="redo-btn" title="Forward again">↷ Redo</button>
+            <select id="version-select" aria-label="Version"></select>
           </div>
+          <span class="spacer"></span>
+          <div class="btn-row">
+            <select id="export-depth" aria-label="Bit depth">
+              <option value="24">WAV 24-bit</option>
+              <option value="16">WAV 16-bit (dithered)</option>
+            </select>
+            <button id="export-btn" title="The whole song, mixed and mastered">Export</button>
+            <button id="chat-btn" class="primary" aria-expanded="false" aria-controls="drawer">💬 Chat &amp; history</button>
+          </div>
+        </div>
+        <p id="export-msg" class="muted small"></p>
 
-          <div class="card chat">
+        <!-- ---------- Mix: lanes + inspector ---------- -->
+        <div id="pane-mix">
+          <div class="transport">
+            <button id="play-btn" class="primary" aria-label="Play">▶</button>
+            <span class="time"><span id="t-now">0:00</span> / <span id="t-total">0:00</span></span>
+            <span id="console-msg" class="muted small" role="status"></span>
+            <span class="spacer"></span>
+            <span class="muted small" title="The page mixes the channels live; mastering (loudness, limiter) is on the Master tab">
+              Monitoring before mastering</span>
+            <label class="small">Volume <input type="range" id="monitor" min="0" max="1.5" step="0.01" value="1" aria-label="Monitor volume"></label>
+          </div>
+          <div class="lanes-wrap">
+            <div class="ruler-row"><div class="lane-head-spacer"></div><canvas id="ruler" height="22"></canvas></div>
+            <div id="lanes" class="lanes"></div>
+          </div>
+          <p class="muted small hint-line">Drag across a channel's waveform to mute it or turn it down for that stretch.
+            Click a channel's name for its EQ, compressor and effects.</p>
+          <div id="inspector" class="card inspector" hidden></div>
+        </div>
+
+        <!-- ---------- Master ---------- -->
+        <div id="pane-master" hidden>
+          <div class="master-grid">
+            <div class="card">
+              <div class="card-head"><h2>Master chain</h2></div>
+              <div id="master-controls"></div>
+            </div>
+            <div class="card">
+              <div class="card-head">
+                <h2>Listen &amp; measure</h2>
+                <button id="master-render" title="Mix and master the whole song as this version">Render</button>
+              </div>
+              <div id="master-msg" class="muted small"></div>
+              <div class="ab">
+                <button id="m-play" class="primary" aria-label="Play" disabled>▶</button>
+                <div class="ab-switch" role="group" aria-label="Compare">
+                  <button id="m-a" class="on" aria-pressed="true">This version</button>
+                  <button id="m-b" aria-pressed="false">Compare with</button>
+                </div>
+                <select id="m-b-select" aria-label="Version to compare with"></select>
+                <label class="check small"><input type="checkbox" id="match-loudness" checked> Loudness-matched</label>
+              </div>
+              <input type="range" id="m-seek" min="0" max="1000" value="0" aria-label="Position">
+              <div id="m-stats" class="stats"></div>
+              <h3 class="small-h">Level over time</h3>
+              <canvas id="m-level" class="graph" height="90"></canvas>
+              <h3 class="small-h">Spectrum <small class="muted">(live while playing)</small></h3>
+              <canvas id="m-spectrum" class="graph" height="120"></canvas>
+              <h3 class="small-h">Tonal balance <small class="muted">(energy per band)</small></h3>
+              <div id="m-bands" class="bands"></div>
+              <audio id="audio-a" preload="auto"></audio>
+              <audio id="audio-b" preload="auto"></audio>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ---------- chat + history drawer ---------- -->
+      <aside id="drawer" class="drawer" hidden>
+        <div class="drawer-head">
+          <h2>Chat &amp; history</h2>
+          <button id="drawer-close" aria-label="Close">✕</button>
+        </div>
+          <div class="chat">
             <div class="card-head">
               <h2>Talk to the mix</h2>
               <button id="engine-btn" class="engine-btn" aria-expanded="false" aria-controls="engine-panel"
@@ -151,42 +215,16 @@
               <button class="primary" id="chat-send">Send</button>
             </form>
           </div>
+        <div class="history">
+          <h3 class="small-h">Versions</h3>
+          <ol id="version-list" class="version-list"></ol>
         </div>
-
-        <div class="col-side">
-          <div class="card">
-            <div class="card-head">
-              <h2>Versions</h2>
-              <div class="btn-row">
-                <button id="undo-btn" title="Back to the version this one came from">Undo</button>
-                <button id="redo-btn">Redo</button>
-              </div>
-            </div>
-            <ol id="version-list" class="version-list"></ol>
-            <div class="export">
-              <select id="export-depth" aria-label="Bit depth">
-                <option value="24">WAV 24-bit</option>
-                <option value="16">WAV 16-bit (dithered)</option>
-              </select>
-              <button id="export-btn">Export</button>
-            </div>
-            <p id="export-msg" class="muted small"></p>
-          </div>
-
-          <div class="card">
-            <h2>Channels</h2>
-            <table class="channels">
-              <thead><tr><th>Stem</th><th title="Level in the mix, relative to the whole">In mix</th><th>Fader</th><th>Mute</th></tr></thead>
-              <tbody id="channel-rows"></tbody>
-            </table>
-            <p id="channels-note" class="muted small">Faders and chat make the same kind of change, and either can be undone.</p>
-          </div>
-        </div>
-      </div>
+      </aside>
     </section>
   </main>
 
   <script src="/static/common.js"></script>
+  <script src="/static/stem-player.js"></script>
   <script src="/static/mixer.js"></script>
 </body>
 </html>

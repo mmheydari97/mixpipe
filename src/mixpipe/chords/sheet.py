@@ -274,6 +274,7 @@ def view(sheet: dict) -> dict:
                                         instrument=instrument_id(sheet)),
     }
     out.pop("melody", None)  # served as "harmonica" instead
+    out["has_guitar"] = bool((out.pop("guitar", None) or {}).get("notes") is not None)  # GET /guitar
     out.pop("vocal_env", None)  # only used on the server, to place syllables
     out["harmonica"] = harmonica_view(sheet)
     return out

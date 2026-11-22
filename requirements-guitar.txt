@@ -1,0 +1,7 @@
+# The guitar tab (chord finder): Basic Pitch's ONNX model and what it imports.
+#   make install-guitar   (installs these, then basic-pitch itself with --no-deps:
+#   its own pins would pull in TensorFlow and downgrade numpy)
+onnxruntime>=1.19
+pretty_midi>=0.2.10
+mir_eval>=0.7
+resampy>=0.4
