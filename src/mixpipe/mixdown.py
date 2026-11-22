@@ -18,24 +18,42 @@ from .panning import pan_mono_to_stereo
 from .plan import SEND_OFF_DB, validate_send_buses
 
 
-def process_stem(stem: Stem, settings: dict, cfg: dict, do_cleanup: bool = True,
-                 cleaned: Stem | None = None) -> Stem:
-    """Full per-stem chain: cleanup -> trim -> EQ -> shape -> compress -> de-ess ->
-    drive/chorus (fx.color) -> fader -> pan.
+def region_points(regions: list[dict]) -> list[tuple[float, float]]:
+    """A stem's regions (plan.validate_regions) as level breakpoints in song time:
+    [(seconds, linear gain)], straight lines between them, 1.0 outside. The
+    render (region_envelope) and the mixer page (which plays them on a Web
+    Audio gain) both use these."""
+    from .plan import REGION_MUTE_DB
 
-    Order matters. `gain_db` is a trim into the chain (so the compressor sees a
-    consistent level); `fader_db` sets the level after it. Cleanup first so the compressor isn't reacting to noise. EQ
-    before compression so the compressor responds to the tone you've decided on.
-    The transient shaper goes before the compressor, which would otherwise level
-    the attacks it is trying to move. De-essing goes after it, because
-    compression lifts sibilance. Pan last, once the signal is final.
+    pts: list[tuple[float, float]] = []
+    for r in regions or []:
+        a, b = float(r["start_s"]), float(r["end_s"])
+        g = 0.0 if r["gain_db"] <= REGION_MUTE_DB else 10.0 ** (r["gain_db"] / 20.0)
+        fade = min(float(r.get("fade_ms", 30.0)) / 1000.0, (b - a) / 2.0)
+        pts += [(a, 1.0), (a + fade, g), (b - fade, g), (b, 1.0)]
+    return [(round(t, 4), round(g, 5)) for t, g in pts]
 
-    `cleaned` is this stem's already-cleaned audio (cleanup does not depend on the
-    plan, so a session that re-renders many times computes it once).
-    """
+
+def region_envelope(regions: list[dict], n: int, sr: int, offset_s: float = 0.0,
+                    speed: float = 1.0) -> np.ndarray | None:
+    """Per-sample gain for `n` samples whose first is at song time `offset_s`
+    (a preview slice) and that play at `speed` (a sped-up render covers more
+    song per second). None when there are no regions."""
+    pts = region_points(regions)
+    if not pts:
+        return None
+    t = offset_s + np.arange(n) / sr * speed
+    return np.interp(t, [p[0] for p in pts], [p[1] for p in pts], left=1.0, right=1.0).astype(np.float32)
+
+
+def chain_stem(stem: Stem, settings: dict, cfg: dict, do_cleanup: bool = True,
+               cleaned: Stem | None = None) -> np.ndarray:
+    """The part of a stem's chain that colours it: cleanup -> trim -> EQ -> shape ->
+    compress -> de-ess -> drive/chorus. What comes after (place_stem: fader,
+    regions, pan) only sets where and how loud it sits, which the mixer page
+    does live on the result of this."""
     s = cleaned if cleaned is not None else (clean_stem(stem, cfg) if do_cleanup else stem)
     audio = s.audio
-
     audio = apply_gain_db(audio, settings["gain_db"])
     audio = apply_eq_chain(
         audio,
@@ -54,13 +72,41 @@ def process_stem(stem: Stem, settings: dict, cfg: dict, do_cleanup: bool = True,
             audio, s.sr, freq=ds.get("freq_hz", 6500.0),
             max_reduction_db=ds["max_reduction_db"],
         )
-    audio = color(audio, s.sr, settings)        # the effects the splitter shares (fx.py)
-    # the fader: level after the chain, so a level change isn't undone by the compressor
+    return color(audio, s.sr, settings)        # the effects the splitter shares (fx.py)
+
+
+def place_stem(audio: np.ndarray, sr: int, settings: dict, offset_s: float = 0.0,
+               speed: float = 1.0) -> np.ndarray:
+    """Fader -> regions -> pan: the level after the chain (so a level change isn't
+    undone by the compressor), the stretches turned down, the stereo place."""
     if abs(settings.get("fader_db", 0.0)) > 1e-6:
         audio = apply_gain_db(audio, settings["fader_db"])
-    audio = pan_mono_to_stereo(audio, settings["pan"])
+    env = region_envelope(settings.get("regions") or [], audio.shape[0], sr, offset_s, speed)
+    if env is not None:                          # stretches turned down or muted (the lanes)
+        audio = audio * (env[:, None] if audio.ndim == 2 else env)
+    return pan_mono_to_stereo(audio, settings["pan"])
 
-    out = s.copy_with(audio.astype(np.float32))
+
+def process_stem(stem: Stem, settings: dict, cfg: dict, do_cleanup: bool = True,
+                 cleaned: Stem | None = None, offset_s: float = 0.0, speed: float = 1.0) -> Stem:
+    """Full per-stem chain: chain_stem (cleanup -> trim -> EQ -> shape -> compress
+    -> de-ess -> drive/chorus) then place_stem (fader -> regions -> pan).
+
+    Order matters. `gain_db` is a trim into the chain (so the compressor sees a
+    consistent level); `fader_db` sets the level after it. Cleanup first so the
+    compressor isn't reacting to noise. EQ before compression so the compressor
+    responds to the tone you've decided on. The transient shaper goes before the
+    compressor, which would otherwise level the attacks it is trying to move.
+    De-essing goes after it, because compression lifts sibilance. Pan last, once
+    the signal is final.
+
+    `cleaned` is this stem's already-cleaned audio (cleanup does not depend on the
+    plan, so a session that re-renders many times computes it once).
+    """
+    base = cleaned if cleaned is not None else stem
+    audio = chain_stem(stem, settings, cfg, do_cleanup, cleaned)
+    audio = place_stem(audio, base.sr, settings, offset_s, speed)
+    out = base.copy_with(audio.astype(np.float32))
     out.meta["processed"] = True
     out.meta["post_peak_db"] = round(peak_db(audio), 2)
     return out
@@ -89,13 +135,16 @@ def mixdown(
     verbose: bool = True,
     cleaned: dict[str, Stem] | None = None,
     bpm: float | None = None,
+    offset_s: float = 0.0,
+    speed: float = 1.0,
 ) -> tuple[np.ndarray, list[Stem], dict]:
     """Process and sum every stem.
 
     Returns (stereo bus, processed stems, report). The bus is left at whatever
     level the sum produced, then trimmed to the configured headroom so the
     master chain has room to work. `bpm` (the tempo as rendered) sets a delay
-    that is synced to a note value.
+    that is synced to a note value. `offset_s` (where the stems start in the
+    song, for a preview slice) and `speed` place the plan's regions.
     """
     cfg = cfg or DEFAULT_CONFIG
     processed: list[Stem] = []
@@ -111,7 +160,7 @@ def mixdown(
             continue
 
         out = process_stem(stem, settings, cfg, do_cleanup=do_cleanup,
-                           cleaned=(cleaned or {}).get(stem.name))
+                           cleaned=(cleaned or {}).get(stem.name), offset_s=offset_s, speed=speed)
         processed.append(out)
         entry = {
             "name": out.name,

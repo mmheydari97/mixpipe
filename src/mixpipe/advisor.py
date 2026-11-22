@@ -966,13 +966,17 @@ _STEM_PARAMS = {
     "gain_db", "pan", "mute", "hpf_hz", "lpf_hz", "eq_add", "eq_clear", "comp_ratio",
     "comp_threshold_db", "deess_db", "reverb_db", "delay_db", "transient_attack",
     "transient_sustain", "drive", "chorus", "bass_db", "treble_db",
+    # the mixer's own controls (not offered to the chat model): input trim, one EQ
+    # band changed or removed, stretches turned down or muted
+    "trim_db", "eq_set", "eq_remove", "region_set", "region_remove", "regions_clear",
 }
 _MASTER_PARAMS = {
-    "target_lufs", "ceiling_db", "eq_add", "eq_clear", "glue_ratio", "reverb_return_db",
+    "target_lufs", "ceiling_db", "eq_add", "eq_clear", "eq_set", "eq_remove", "glue_ratio",
+    "glue_threshold_db", "master_hpf_hz", "reverb_return_db",
     "delay_return_db", "reverb_decay_s", "speed_pct", "semitones", "reverb_size",
     "reverb_pre_delay_ms", "delay_ms", "delay_sync", "delay_feedback",
 }
-_MAX_STEP = {"gain_db": 12.0, "pan": 2.0, "comp_ratio": 6.0, "comp_threshold_db": 18.0,
+_MAX_STEP = {"gain_db": 12.0, "trim_db": 12.0, "glue_threshold_db": 18.0, "pan": 2.0, "comp_ratio": 6.0, "comp_threshold_db": 18.0,
              "deess_db": 10.0, "reverb_db": 24.0, "delay_db": 24.0, "transient_attack": 2.0,
              "transient_sustain": 2.0, "target_lufs": 6.0, "glue_ratio": 3.0,
              "reverb_return_db": 18.0, "delay_return_db": 18.0, "reverb_decay_s": 4.0,
@@ -1060,7 +1064,84 @@ def apply_adjustments(plan: dict, stems: list[Stem], adjustments: list,
     return validate_plan(new, stems, cfg), rejected
 
 
+def _set_band(bands: list, adj: dict) -> list | None:
+    """eq_set {"index", band} (an index past the end adds one) / eq_remove {"index"}."""
+    value = adj.get("value")
+    if not isinstance(value, dict):
+        value = {"index": value}
+    try:
+        i = int(value.get("index", -1))
+    except (TypeError, ValueError):
+        return None
+    bands = list(bands or [])
+    if adj.get("param") == "eq_remove":
+        if not 0 <= i < len(bands):
+            return None
+        return bands[:i] + bands[i + 1:]
+    b = _band({**(bands[i] if 0 <= i < len(bands) else {}), **{k: v for k, v in value.items() if k != "index"}})
+    if b is None:
+        return None
+    if 0 <= i < len(bands):
+        bands[i] = b
+    elif len(bands) < 6:
+        bands.append(b)
+    else:
+        return None
+    return bands
+
+
+def _set_region(st: dict, adj: dict) -> bool:
+    """region_set {start_s, end_s, gain_db, fade_ms}: replaces what it overlaps;
+    region_remove {start_s, end_s} (or {"index"}): drops the regions it touches."""
+    value = adj.get("value")
+    regions = list(st.get("regions") or [])
+    if adj.get("param") == "regions_clear":
+        st["regions"] = []
+        return True
+    if not isinstance(value, dict):
+        return False
+    if "index" in value and adj.get("param") == "region_remove":
+        try:
+            i = int(value["index"])
+        except (TypeError, ValueError):
+            return False
+        if not 0 <= i < len(regions):
+            return False
+        st["regions"] = regions[:i] + regions[i + 1:]
+        return True
+    try:
+        a, b = float(value["start_s"]), float(value["end_s"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not b > a:
+        return False
+    keep = [r for r in regions if r["end_s"] <= a or r["start_s"] >= b]
+    if adj.get("param") == "region_remove":
+        if len(keep) == len(regions):
+            return False
+        st["regions"] = keep
+        return True
+    new = {"start_s": a, "end_s": b, "gain_db": value.get("gain_db", -60.0),
+           "fade_ms": value.get("fade_ms", 30.0)}
+    st["regions"] = sorted(keep + [new], key=lambda r: r["start_s"])
+    return True
+
+
 def _apply_stem(st: dict, param: str, adj: dict) -> bool:
+    if param in ("region_set", "region_remove", "regions_clear"):
+        return _set_region(st, adj)
+    if param in ("eq_set", "eq_remove"):
+        bands = _set_band(st.get("eq", []), {**adj, "param": param})
+        if bands is None:
+            return False
+        st["eq"] = bands
+        return True
+    if param == "trim_db":
+        value = _num(adj, float(st.get("gain_db", 0.0)), param)
+        if value is None:
+            return False
+        st["gain_db"] = value
+        return True
     if param == "mute":
         st["mute"] = bool(adj.get("value", True))
         return True
@@ -1112,6 +1193,12 @@ def _apply_stem(st: dict, param: str, adj: dict) -> bool:
 
 def _apply_master(plan: dict, param: str, adj: dict) -> bool:
     m = plan.setdefault("master", {})
+    if param in ("eq_set", "eq_remove"):
+        bands = _set_band(m.get("master_eq", []), {**adj, "param": param})
+        if bands is None:
+            return False
+        m["master_eq"] = bands
+        return True
     if param == "eq_add":
         b = _band(adj.get("value"))
         if b is None:
@@ -1138,6 +1225,8 @@ def _apply_master(plan: dict, param: str, adj: dict) -> bool:
         buses.setdefault("delay", {})["sync"] = ""
     slot = {"target_lufs": (m, "target_lufs"), "ceiling_db": (m, "ceiling_db"),
             "glue_ratio": (m.setdefault("glue_comp", {}), "ratio"),
+            "glue_threshold_db": (m.setdefault("glue_comp", {}), "threshold_db"),
+            "master_hpf_hz": (m, "master_hpf_hz"),
             "reverb_return_db": (buses.setdefault("reverb", {}), "return_db"),
             "delay_return_db": (buses.setdefault("delay", {}), "return_db"),
             "reverb_decay_s": (buses.setdefault("reverb", {}), "decay_s"),
@@ -1152,6 +1241,11 @@ def _apply_master(plan: dict, param: str, adj: dict) -> bool:
         return False
     holder[key] = value
     return True
+
+
+def _clock(seconds: float) -> str:
+    m, sec = divmod(round(float(seconds), 1), 60)
+    return f"{int(m)}:{sec:04.1f}" if sec % 1 else f"{int(m)}:{int(sec):02d}"
 
 
 def _fmt_eq(b: dict) -> str:
@@ -1194,8 +1288,18 @@ def diff_plans(old: dict, new: dict) -> list[dict]:
             added = [x for x in eb if x not in ea]
             if not eb:
                 add(name, "eq", f"{name} EQ cleared")
+            elif not added:
+                add(name, "eq", f"{name} EQ band removed")
             for x in added:
                 add(name, "eq", f"{name} EQ {_fmt_eq(x)}")
+        ra, rb = a.get("regions", []), b.get("regions", [])
+        if ra != rb:
+            for r in (x for x in rb if x not in ra):
+                what = "muted" if r["gain_db"] <= -60 else f"{r['gain_db']:+.0f} dB"
+                add(name, "regions", f"{name} {what} {_clock(r['start_s'])}-{_clock(r['end_s'])}")
+            for r in (x for x in ra if x not in rb):
+                if not any(x["start_s"] < r["end_s"] and x["end_s"] > r["start_s"] for x in rb):
+                    add(name, "regions", f"{name} back to normal {_clock(r['start_s'])}-{_clock(r['end_s'])}")
         for grp, key, label, unit in (("comp", "ratio", "ratio", ":1"), ("comp", "threshold_db", "comp threshold", " dB"),
                                       ("deess", "max_reduction_db", "de-ess", " dB"),
                                       ("sends", "reverb_db", "reverb send", " dB"),
@@ -1219,6 +1323,8 @@ def diff_plans(old: dict, new: dict) -> list[dict]:
         added = [x for x in mb.get("master_eq", []) if x not in ma.get("master_eq", [])]
         if not mb.get("master_eq"):
             add("master", "eq", "master EQ cleared")
+        elif not added:
+            add("master", "eq", "master EQ band removed")
         for x in added:
             add("master", "eq", f"master EQ {_fmt_eq(x)}")
     sa, sb = ma.get("speed", 1.0), mb.get("speed", 1.0)
@@ -1230,6 +1336,11 @@ def diff_plans(old: dict, new: dict) -> list[dict]:
     ga, gb = ma.get("glue_comp", {}).get("ratio"), mb.get("glue_comp", {}).get("ratio")
     if ga is not None and gb is not None and abs(ga - gb) > 1e-6:
         add("master", "glue", f"master glue {ga:.1f}:1 -> {gb:.1f}:1")
+    ga, gb = ma.get("glue_comp", {}).get("threshold_db"), mb.get("glue_comp", {}).get("threshold_db")
+    if ga is not None and gb is not None and abs(ga - gb) > 1e-6:
+        add("master", "glue", f"master glue threshold {ga:.1f} -> {gb:.1f} dB")
+    if abs(ma.get("master_hpf_hz", 0) - mb.get("master_hpf_hz", 0)) > 1e-6:
+        add("master", "master_hpf_hz", f"master high-pass {ma.get('master_hpf_hz', 0):.0f} -> {mb.get('master_hpf_hz', 0):.0f} Hz")
     for bus, key, label, unit in (("reverb", "return_db", "reverb return", " dB"),
                                   ("delay", "return_db", "delay return", " dB"),
                                   ("reverb", "decay_s", "reverb decay", " s"),

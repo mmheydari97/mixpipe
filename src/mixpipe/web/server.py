@@ -16,7 +16,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 
-from ..chords import pipeline
+from ..chords import guitar, pipeline, stems6
 from ..chords.align import lines_to_text, reanchor, word_diff
 from ..chords.harmonica import (add_note, merge_notes, note_from_display, set_fingering,
                                 set_main, split_note, to_harp_text)
@@ -80,6 +80,30 @@ class NoteEdit(BaseModel):
     note: str | None = None          # add: as typed on the tab, e.g. "C5" or "Bb"
 
 
+class GuitarNoteIn(BaseModel):
+    selected: int | None = None
+    custom: str | None = None        # as shown ("F#", "A4"); "" reverts, "rest" removes
+    fingering: int | None = None     # index into the note's positions
+    auto_fingering: bool = False
+    part: str | None = None          # pin to "lead" or "rhythm"
+    auto_part: bool = False
+
+
+class GuitarEdit(BaseModel):
+    action: str                      # split | merge | add | delete | lock | unlock
+    id: str | None = None            # split / delete / lock: the note
+    ids: list[str] | None = None     # merge
+    at: float | None = None          # split: where (seconds)
+    start: float | None = None       # add
+    end: float | None = None
+    note: str | None = None          # add: as shown, e.g. "A4"
+    part: str | None = None          # add: the part; lock: "lead" (default) or "rhythm"
+
+
+class GuitarIn(BaseModel):
+    redo: bool = False               # listen again instead of using the cached notes
+
+
 class MelodyIn(BaseModel):
     fast: bool = False               # keep grace notes and quick runs
 
@@ -129,11 +153,19 @@ def create_app(
     neural_provider=None,
     reviser=None,
     workers: int = 1,
+    splitter_root: str | Path | None = None,
+    stem_separator=None,
+    guitar_transcriber=None,
 ) -> FastAPI:
     """Build the app. `separator`/`transcriber`/`resolver`/`downloader`/
     `melody_extractor`/`retimer`/`reviser` (the lyric revision's chat call) are injectable for tests, and `run_inline` runs analysis
-    synchronously instead of in the worker thread."""
+    synchronously instead of in the worker thread. `splitter_root`: where the
+    splitter keeps its songs, so a song split there isn't split again for the
+    Vocals/Guitar sliders (`stem_separator` fakes that split in tests)."""
     root = Path(root)
+    if splitter_root is None:
+        from ..splitter.pipeline import DEFAULT_ROOT as splitter_root
+    splitter_root = Path(splitter_root)
     app = FastAPI(title="mixpipe chords")
     sheet_lock = threading.Lock()
     svc = chords_service(root, run_inline, workers, separator=separator, transcriber=transcriber,
@@ -265,8 +297,118 @@ def create_app(
             raise HTTPException(404, "no playback audio yet")
         return FileResponse(f, media_type=AUDIO_TYPES.get(f.suffix.lower()))
 
+    # ---- guitar tab (chords/guitar.py) -----------------------------------------
+
+    def guitar_out(sheet: dict, part: str):
+        try:
+            v = guitar.guitar_view(sheet, part)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if v is None:
+            raise HTTPException(409, "no guitar tab yet")
+        v.pop("_events", None)
+        return v
+
+    @app.get("/api/songs/{song_id}/guitar")
+    def get_guitar(song_id: str, part: str = "lead"):
+        return guitar_out(load_sheet(sheet_path(song_id)), part)
+
+    @app.get("/api/songs/{song_id}/guitar/status")
+    def guitar_status(song_id: str):
+        d = song_dir(song_id)
+        st = pipeline.get_status(d, pipeline.GUITAR_STATUS)
+        if st.get("state") == "queued":
+            st["ahead"] = svc.queue.ahead(song_id)
+        return st
+
+    @app.post("/api/songs/{song_id}/guitar")
+    def find_guitar(song_id: str, body: GuitarIn | None = None):
+        """Split the song if needed and write out its guitar; poll /guitar/status."""
+        d = song_dir(song_id)
+        sheet_path(song_id)
+        st = pipeline.get_status(d, pipeline.GUITAR_STATUS)
+        if st.get("state") in ("queued", "running"):
+            return st
+        pipeline.set_status(d, "queued", "separate", 0.0, "waiting", file=pipeline.GUITAR_STATUS)
+        svc.submit(song_id, lambda: pipeline.run_guitar_job(
+            d, splitter_root, lock=sheet_lock, transcriber=guitar_transcriber,
+            separator=stem_separator, cancelled=svc.cancelled(song_id),
+            force=bool(body and body.redo)))
+        return pipeline.get_status(d, pipeline.GUITAR_STATUS)
+
+    @app.patch("/api/songs/{song_id}/guitar/notes/{note_id}")
+    def patch_guitar_note(song_id: str, note_id: str, body: GuitarNoteIn, part: str = "lead"):
+        p = sheet_path(song_id)
+        with sheet_lock:
+            sheet = load_sheet(p)
+            try:
+                guitar.edit_note(sheet, note_id, **body.model_dump())
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            save_sheet(sheet, p)
+        return guitar_out(sheet, part)
+
+    @app.post("/api/songs/{song_id}/guitar/notes")
+    def edit_guitar_notes(song_id: str, body: GuitarEdit, part: str = "lead"):
+        """Split, merge, add or delete notes, or lock the solo guitar; returns the view."""
+        p = sheet_path(song_id)
+        with sheet_lock:
+            sheet = load_sheet(p)
+            try:
+                if body.action == "split":
+                    guitar.split_note(sheet, body.id or "", body.at)
+                elif body.action == "merge":
+                    guitar.merge_notes(sheet, body.ids or [])
+                elif body.action == "add":
+                    if body.start is None or body.end is None or not body.note:
+                        raise ValueError("a new note needs start, end and a pitch")
+                    guitar.add_note(sheet, body.start, body.end, body.note, body.part)
+                elif body.action == "delete":
+                    guitar.delete_note(sheet, body.id or "")
+                elif body.action == "lock":
+                    guitar.lock_part(sheet, body.id or "", body.part or "lead")
+                elif body.action == "unlock":
+                    sheet["guitar"]["lock"] = None
+                else:
+                    raise ValueError("action must be split, merge, add, delete, lock or unlock")
+            except (ValueError, KeyError, TypeError) as exc:
+                raise HTTPException(400, str(exc)) from exc
+            save_sheet(sheet, p)
+        return guitar_out(sheet, part)
+
+    # ---- play-along: vocals / guitar / backing, split on first use (stems6.py) ----
+
+    @app.get("/api/songs/{song_id}/playalong")
+    def playalong_status(song_id: str):
+        d = song_dir(song_id)
+        st = stems6.status(d, splitter_root)
+        if st.get("state") == "queued":
+            st["ahead"] = svc.queue.ahead(song_id)
+        return st
+
+    @app.post("/api/songs/{song_id}/playalong")
+    def playalong_start(song_id: str):
+        """Split the song into stems unless that's done or under way; poll GET."""
+        d = song_dir(song_id)
+        st = stems6.status(d, splitter_root)
+        if not st["ready"] and st.get("state") not in ("queued", "running"):
+            pipeline.set_status(d, "queued", "decode", 0.0, "waiting", file=stems6.STATUS)
+            svc.submit(song_id, lambda: stems6.run_job(
+                d, splitter_root, cancelled=svc.cancelled(song_id), separator=stem_separator))
+            st = stems6.status(d, splitter_root)
+        return st
+
+    @app.get("/api/songs/{song_id}/playalong/{name}")
+    def playalong_stem(song_id: str, name: str):
+        if name not in stems6.PLAY:
+            raise HTTPException(404, "no such stem")
+        f = stems6.stem_file(song_dir(song_id), name, splitter_root)
+        if f is None:
+            raise HTTPException(409, "the song isn't split yet")
+        return FileResponse(f, media_type="audio/flac")
+
     @app.get("/api/songs/{song_id}/export")
-    def export(song_id: str, fmt: str = "cho"):
+    def export(song_id: str, fmt: str = "cho", part: str = "lead"):
         sheet = load_sheet(sheet_path(song_id))
         if fmt == "cho":
             body, ext = to_chordpro(sheet), "cho"
@@ -274,8 +416,10 @@ def create_app(
             body, ext = to_text(sheet), "txt"
         elif fmt == "harp":
             body, ext = to_harp_text(sheet), "harp.txt"
+        elif fmt == "tab":
+            body, ext = guitar.to_tab_text(sheet, part), f"{part}.tab.txt"
         else:
-            raise HTTPException(400, "fmt must be cho, txt or harp")
+            raise HTTPException(400, "fmt must be cho, txt, harp or tab")
         return PlainTextResponse(body, headers={
             "Content-Disposition": f'attachment; filename="{song_id}.{ext}"'})
 

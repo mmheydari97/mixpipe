@@ -126,6 +126,44 @@ Stem role detection is filename-based: name files like `acoustic_gtr.wav`,
 where pan works as a balance control (`mixdown.keep_stereo: false` folds them to
 mono); a "stereo" file whose two sides are identical is treated as mono.
 
+## The mixer page: lanes, inspector, master
+
+`make mix-ui` (or the Mixer on `make ui`) opens a session in two tabs.
+
+**Mix** shows one lane per channel over the whole song, with its waveform:
+
+- **M**ute, **S**olo, a **level** fader (dB) and **pan** per channel, and a level
+  meter. These are heard at once: the page plays every channel itself (the
+  splitter's player, `static/stem-player.js`) and mixes them live. Letting go of a
+  control saves it as a new version, the same way a chat message does, so undo
+  and the version list work for both. Solo is for listening only and isn't saved.
+  Double-click a fader or pan for 0 dB / centre.
+- **Drag across a waveform** to pick a stretch, then **Mute** it or turn it down
+  (−3, −6, −12 dB or any level) with a fade (30 ms by default). Click a stretch
+  to change it or put it **back to normal**. The stretches are part of the plan
+  (`regions`), so the master and Export include them.
+- **Click a channel's name** for its inspector: the **EQ curve** the audio gets
+  (drawn from the same filters the render uses, `eq.eq_response`), up to six bands
+  (bell, low or high shelf; frequency, gain, Q; remove, + Band), high- and low-pass,
+  input trim, compressor threshold and ratio, de-esser, reverb and echo sends,
+  drive and chorus. These are processed on the server (`mixdown.chain_stem`), so a
+  change is heard a few seconds after you let go.
+- What you hear here is the mix **before mastering**. The first time a session
+  opens its channels, each is processed over the whole song (about 30 s for a
+  3-minute song with six channels); after that only a channel whose chain changes
+  is processed again (about 3 s).
+
+**Master** renders the whole song mixed and mastered (cached per version) and shows:
+loudness (LUFS), true peak, crest, loudness range, stereo correlation, how hard the
+limiter worked, the level over time, a live spectrum, and the energy per band. Its
+controls are the master chain: loudness target, ceiling, glue compressor, master EQ
+and high-pass, and the shared reverb and echo. **Compare with** plays another
+version, loudness-matched by default.
+
+The **chat and the version history** are in the drawer (💬). Sessions are saved in
+`out/mixer/<id>/` and come back after the server restarts; deleting a session removes
+that folder (a splitter song's stems stay where they are).
+
 ## Mix by chat
 
 After the first mix, say what you hear and the mix changes:
@@ -177,10 +215,9 @@ How a turn works (`session.MixSession`, `advisor.revise_plan`):
   2-4 s of rendering; a small free model may answer in a form the mixer can't use,
   and that message then goes to the keyword rules.
 - Each turn is a new version; nothing is thrown away. Undo goes back to the version
-  a turn was made from, and a new turn after an undo starts a branch. The web page
-  has an A/B player (loudness-matched by default, so the louder version can't win
-  just by being louder), faders and mutes that go through the same path, and
-  Export. CLI commands: `/undo /redo /goto N /plan /levels /model [id] /models [words]
+  a turn was made from, and a new turn after an undo starts a branch. The page's
+  console (above) goes through the same path, and its Master tab compares versions
+  loudness-matched, so the louder one can't win just by being louder. CLI commands: `/undo /redo /goto N /plan /levels /model [id] /models [words]
   /export [path] /quit`.
 - **Tempo and key**: "a little slower" (5%), "slower" (10%), "much faster" (20%),
   "play it at 80%", "at 90 bpm" (the session measures the song's tempo), "up a

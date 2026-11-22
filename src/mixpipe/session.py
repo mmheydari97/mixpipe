@@ -25,6 +25,7 @@ chat turn or fader move made while listening to it continues from that base.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -42,7 +43,7 @@ from .config import load_config
 from .dynamics import limit
 from .io_utils import Stem, load_stems, read_audio, stems_mono, to_sample_rate, write_audio
 from .master import dither, master
-from .mixdown import mixdown
+from .mixdown import add_send_buses, chain_stem, mixdown, place_stem, region_points
 from .plan import save_plan, validate_plan
 from .timing import align_stems, estimate_tempo_bpm
 
@@ -181,6 +182,9 @@ class MixSession:
         self.versions: list[dict] = []
         self.turns: list[dict] = []          # the conversation, including replies that changed nothing
         self.pos = -1
+        self._full_cleaned: dict[str, Stem] = {}
+        self._full_aligned: list[Stem] | None = None
+        self._peaks: dict | None = None
 
     # ------------------------------------------------------------------ #
     def _slice(self, stems: list[Stem]) -> list[Stem]:
@@ -228,7 +232,9 @@ class MixSession:
             cache = self._at_speed(stems, cache, speed, semitones)
         t0 = time.time()
         bpm = self.tempo_bpm * speed if self.tempo_bpm else None   # a synced echo follows the tempo
-        bus, processed, mix_report = mixdown(stems, plan, self.cfg, verbose=False, cleaned=cache, bpm=bpm)
+        offset = self.start_s if stems is self.stems else 0.0
+        bus, processed, mix_report = mixdown(stems, plan, self.cfg, verbose=False, cleaned=cache, bpm=bpm,
+                                             offset_s=offset, speed=speed)
         final, master_report = master(bus, plan, self.cfg, verbose=False, reference=self.reference)
         sr = self.cfg.get("sample_rate", 48_000)
         bus_lufs = integrated_lufs(bus.mean(axis=1), sr)
@@ -254,6 +260,8 @@ class MixSession:
             "changes": diff_plans(prev["plan"], plan) if prev else [],
             "plan": plan, "output": r["output"], "levels": r["levels"],
             "master_report": r["master_report"], "wav": str(wav), "render_s": r["render_s"],
+            "bus_trim_db": round(r["mix_report"].get("bus_peak_db_trimmed", 0.0)
+                                 - r["mix_report"].get("bus_peak_db_raw", 0.0), 2),
             "parent": prev["n"] if prev else None, "time": time.time(),
             **(extra or {}),
         }
@@ -470,10 +478,8 @@ class MixSession:
                 audio, sr = read_audio(cur["wav"])
                 audio = to_sample_rate(audio, sr, self.cfg.get("sample_rate", 48_000))
             elif full and self.preview:
-                stems = align_stems(self._full) if self.align else self._full
+                stems = self.full_stems()
                 plan = validate_plan(cur["plan"], stems, self.cfg)
-                if not hasattr(self, "_full_cleaned"):
-                    self._full_cleaned: dict[str, Stem] = {}
                 audio = self.render(plan, stems, self._full_cleaned)["audio"]
             else:
                 audio = self.render(cur["plan"])["audio"]
@@ -483,6 +489,214 @@ class MixSession:
             else:
                 write_audio(path, audio, sr, subtype="PCM_24")
             return path
+
+    # ------------------------------------------------------------------ #
+    # the mixer page's console: every channel over the whole song, played live
+
+    def full_stems(self) -> list[Stem]:
+        """The whole song's stems (aligned like the preview), for the console,
+        the master render and export."""
+        if not self.preview:
+            return self.stems
+        if self._full_aligned is None:
+            self._full_aligned = align_stems(self._full) if self.align else self._full
+        return self._full_aligned
+
+    def _plan_of(self, v: dict) -> dict:
+        """The plan a version plays: an AI edit's base plan."""
+        return self.version(v["base"])["plan"] if v.get("kind") == "ai" else v["plan"]
+
+    @staticmethod
+    def _key(*parts) -> str:
+        return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:12]
+
+    _LIVE = ("fader_db", "pan", "mute", "regions", "sends", "reason", "role")   # set by the page itself
+
+    def console(self, n: int | None = None) -> dict:
+        """Each channel's audio through its chain (EQ, dynamics, effects) but before
+        fader, regions and pan, over the whole song, plus the reverb/echo return:
+        files the page mixes live (stem-player.js), re-made only when the chain
+        changes. Cached in console/ by a hash of what shapes them."""
+        import soundfile as sf
+
+        with self.lock:
+            v = self.version(n) if n is not None else (self.current or self.first_mix())
+            plan = self._plan_of(v)
+            stems = self.full_stems()
+            plan = validate_plan(plan, stems, self.cfg)
+            speed = float(plan["master"].get("speed", 1.0))
+            semis = int(plan["master"].get("semitones", 0))
+            cache = self._clean_all(stems, self._full_cleaned if self.preview else self.cleaned)
+            if speed != 1.0 or semis:
+                cache = self._at_speed(stems, cache, speed, semis)
+            out_dir = self.out_dir / "console"
+            out_dir.mkdir(exist_ok=True)
+            sr = stems[0].sr
+            channels, chained = [], {}
+            for st in stems:
+                settings = plan["stems"][st.name]
+                chain = {k: val for k, val in settings.items() if k not in self._LIVE}
+                key = self._key(st.name, chain, speed, semis)
+                path = out_dir / f"{st.name}_{key}.flac"
+                meta = out_dir / f"{st.name}_{key}.json"
+                if not path.exists() or not meta.exists():
+                    audio = chain_stem(st, settings, self.cfg, cleaned=cache[st.name])
+                    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+                    scale_db = 20 * np.log10(peak) if peak > 1.0 else 0.0     # FLAC can't go over 0 dBFS
+                    sf.write(str(path), (audio / max(peak, 1.0)).astype(np.float32), sr,
+                             format="FLAC", subtype="PCM_24")
+                    meta.write_text(json.dumps({"scale_db": round(float(scale_db), 3)}))
+                    chained[st.name] = audio
+                scale_db = json.loads(meta.read_text())["scale_db"]
+                channels.append({"name": st.name, "role": settings.get("role") or st.role,
+                                 "file": path.name, "scale_db": scale_db,
+                                 "fader_db": settings["fader_db"], "pan": settings["pan"],
+                                 "mute": settings["mute"], "regions": settings.get("regions", []),
+                                 "points": region_points(settings.get("regions", [])),
+                                 "sends": settings.get("sends", {}), "eq": settings.get("eq", []),
+                                 "hpf_hz": settings["hpf_hz"], "lpf_hz": settings["lpf_hz"],
+                                 "comp": settings.get("comp", {}), "deess": settings.get("deess", {}),
+                                 "gain_db": settings["gain_db"],
+                                 "drive": settings.get("drive", {}), "chorus": settings.get("chorus", {})})
+            fx = self._fx_return(plan, stems, chained, channels, speed, sr, out_dir)
+            return json_safe({"n": v["n"], "sr": sr, "speed": speed, "semitones": semis,
+                              "duration_s": round(self.full_duration, 3), "channels": channels,
+                              "fx": fx, "bus_trim_db": v.get("bus_trim_db", 0.0),
+                              "master": {k: plan["master"].get(k) for k in
+                                         ("target_lufs", "ceiling_db", "master_hpf_hz", "master_eq",
+                                          "glue_comp")},
+                              "send_buses": plan.get("send_buses", {})})
+
+    def _fx_return(self, plan, stems, chained, channels, speed, sr, out_dir) -> dict | None:
+        """The reverb and echo every channel sends to, as one more track. It hears the
+        channels after their faders, so it is re-made when a level, a send or a room
+        setting changes."""
+        import soundfile as sf
+
+        sends_on = any(not c["mute"] and max(c["sends"].get("reverb_db", -60), c["sends"].get("delay_db", -60)) > -60
+                       for c in channels)
+        if not sends_on:
+            return None
+        live = {c["name"]: {k: c[k] for k in ("fader_db", "pan", "mute", "regions", "sends")} for c in channels}
+        key = self._key([c["file"] for c in channels], live, plan.get("send_buses"), speed)
+        path = out_dir / f"fx_{key}.flac"
+        meta = out_dir / f"fx_{key}.json"
+        if not path.exists() or not meta.exists():
+            placed = []
+            for c, st in zip(channels, stems):
+                if c["mute"]:
+                    continue
+                audio = chained.get(c["name"])
+                if audio is None:
+                    audio, _ = sf.read(str(out_dir / c["file"]), dtype="float32", always_2d=False)
+                    audio = audio * 10 ** (c["scale_db"] / 20)
+                settings = plan["stems"][c["name"]]
+                placed.append(st.copy_with(place_stem(audio, sr, settings, 0.0, speed).astype(np.float32)))
+            bpm = self.tempo_bpm * speed if self.tempo_bpm else None
+            ret = add_send_buses(placed, plan, self.cfg, bpm=bpm) if placed else np.zeros((1, 2), np.float32)
+            peak = float(np.max(np.abs(ret))) if ret.size else 0.0
+            scale_db = 20 * np.log10(peak) if peak > 1.0 else 0.0
+            sf.write(str(path), (ret / max(peak, 1.0)).astype(np.float32), sr, format="FLAC", subtype="PCM_24")
+            meta.write_text(json.dumps({"scale_db": round(float(scale_db), 3)}))
+        return {"file": path.name, "scale_db": json.loads(meta.read_text())["scale_db"]}
+
+    def peaks(self, points: int = 1600) -> dict:
+        """Each stem's waveform for the lanes: {name: [[min, max], ...]} over the
+        whole song (as recorded, before any processing)."""
+        with self.lock:
+            if self._peaks is None:
+                out = {}
+                for st in self.full_stems():
+                    mono = st.mono()
+                    k = max(1, len(mono) // points)
+                    m = mono[: len(mono) // k * k].reshape(-1, k)
+                    out[st.name] = np.round(np.stack([m.min(axis=1), m.max(axis=1)], axis=1), 3).tolist()
+                self._peaks = out
+            return self._peaks
+
+    def render_master(self, n: int | None = None) -> dict:
+        """The whole song mixed and mastered as version `n` (default the current one),
+        cached as master_v<n>.wav, with what the master tab shows."""
+        with self.lock:
+            v = self.version(n) if n is not None else (self.current or self.first_mix())
+            path = self.out_dir / f"master_v{v['n']}.wav"
+            stats_path = self.out_dir / f"master_v{v['n']}.json"
+            if path.exists() and stats_path.exists():
+                return json.loads(stats_path.read_text())
+            sr = self.cfg.get("sample_rate", 48_000)
+            if v.get("kind") == "ai":
+                audio, a_sr = read_audio(v["wav"])
+                audio, report = to_sample_rate(audio, a_sr, sr), {}
+            else:
+                stems = self.full_stems()
+                plan = validate_plan(v["plan"], stems, self.cfg)
+                r = self.render(plan, stems, self._full_cleaned if self.preview else self.cleaned)
+                audio, report = r["audio"], r["master_report"]
+            write_audio(str(path), audio, sr)
+            out = analyze_master(audio, sr)
+            mono = audio.mean(axis=1) if audio.ndim == 2 else audio
+            hop = sr // 2
+            frames = mono[: len(mono) // hop * hop].reshape(-1, hop)
+            rms = 10 * np.log10(np.maximum((frames ** 2).mean(axis=1), 1e-10))
+            stats = json_safe({
+                "n": v["n"], "file": path.name, "duration_s": round(len(audio) / sr, 2),
+                "output": {k: out.get(k) for k in ("lufs", "true_peak_db", "peak_db", "crest_db",
+                                                   "loudness_range_db", "lr_correlation", "band_energy_db",
+                                                   "spectral_centroid_hz")},
+                "level_db": [round(float(x), 1) for x in rms],
+                "level_hop_s": 0.5,
+                "loudness_gain_db": report.get("loudness_gain_db"),
+                "crest_lost_db": report.get("crest_lost_db"),
+                "warning": report.get("warning"),
+            })
+            stats_path.write_text(json.dumps(stats))
+            return stats
+
+    def eq_curve(self, target: str, n: int | None = None) -> dict:
+        """A channel's (or the master's) EQ as the audio gets it (eq.eq_response)."""
+        from .eq import eq_response
+
+        v = self.version(n) if n is not None else self.current
+        plan = self._plan_of(v)
+        sr = self.cfg.get("sample_rate", 48_000)
+        if target == "master":
+            m = plan["master"]
+            return eq_response(m.get("master_hpf_hz", 0.0), 0.0, m.get("master_eq", []), sr)
+        st = plan["stems"].get(target)
+        if st is None:
+            raise KeyError(target)
+        return eq_response(st["hpf_hz"], st["lpf_hz"], st.get("eq", []), sr)
+
+    # ------------------------------------------------------------------ #
+    # sessions survive a restart of the server
+
+    @classmethod
+    def restore(cls, out_dir: str, **kwargs) -> "MixSession":
+        """A session again from its session.json and the plans saved next to it
+        (the stems are read again from where they were)."""
+        out_dir = Path(out_dir)
+        idx = json.loads((out_dir / "session.json").read_text())
+        s = cls(idx["stems_dir"], out_dir=str(out_dir), start_s=idx.get("start_s"),
+                duration_s=idx.get("duration_s"), preview=bool(idx.get("duration_s") or idx.get("start_s")),
+                **kwargs)
+        from .plan import load_plan
+
+        for entry in idx["versions"]:
+            plan_path = out_dir / f"mix_plan_v{entry['n']}.json"
+            if plan_path.exists():
+                entry["plan"] = load_plan(str(plan_path))
+            elif entry.get("kind") == "ai":
+                entry["plan"] = None
+            else:
+                continue
+            entry.setdefault("master_report", None)
+            s.versions.append(entry)
+        for v in s.versions:                  # an AI edit plays its base plan
+            if v.get("plan") is None:
+                v["plan"] = s.version(v["base"])["plan"]
+        s.turns = idx.get("turns", [])
+        s.pos = min(max(int(idx.get("position", len(s.versions) - 1)), 0), len(s.versions) - 1)
+        return s
 
     def summary(self, v: dict | None = None) -> dict:
         """A version without its audio-sized parts, for the web page."""

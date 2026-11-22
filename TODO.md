@@ -34,6 +34,23 @@ apps that use it.
 - [x] **T7 Record yourself** over the backing in the splitter; takes play back in sync and can be
   downloaded or mixed in.
 
+Requested 2026-11-22, same rule:
+
+- [x] **R1 Play along in the chord finder.** Two sliders under the player, Vocals and
+  Guitar (0–100%). The six-stem split runs the first time one moves, with the
+  splitter's code (`chords/stems6.py`), reusing the splitter's stems when it has the
+  song. The splitter's player became `static/stem-player.js`, used by the splitter,
+  these sliders and the mixer.
+- [x] **R2 Guitar notes tab.** The recorded guitar as staff and/or tab (VexFlow,
+  vendored), strums vs picked notes, lead vs rhythm with a lock on the solo guitar,
+  solo sections, fingering, rhythm on the beat grid (`chords/guitar.py`,
+  `chords/guitar_transcribe.py`, Basic Pitch). Note editing shared with the harmonica
+  (`chords/notes.py`, `static/note-menu.js`).
+- [x] **R3 Mixer as a mix and master app.** Lanes with live faders/pan/mute/solo and
+  meters, stretches muted or turned down (`regions`), an inspector with the EQ curve
+  and every chain control, a Master tab that renders, measures and compares, the
+  chat in a drawer, sessions that survive a restart.
+
 ---
 
 ## Mixer
@@ -75,6 +92,16 @@ Nothing is stubbed any more. What is left are limits of what exists:
   understand. Sessions live in the server's memory: restarting `mix-ui` keeps the
   rendered versions on disk (`out/mixer/<id>/versions/`, with `session.json`) but
   doesn't reload them as sessions.
+- **The console hears the mix before mastering.** Faders, pan, mute, solo and
+  stretches are mixed in the page; EQ, dynamics and effects are rendered on the
+  server per channel, so a change there is heard a few seconds after release (the
+  version save also renders the chat's preview stretch, ~3 s). The reverb/echo return
+  follows fader and send changes on release, not while you drag.
+- **Stretches (regions)** have one level each with a linear fade; there is no drawn
+  automation curve, and the page applies the fades at screen rate (fine for fades of
+  ~30 ms and up). Stretches are in song time and follow speed changes.
+- **EQ bands** are edited with sliders; dragging the points on the curve isn't
+  supported, and the curve redraws when a change is saved.
 - **Stereo stems** keep their image; pan on them is a balance control, and there is no
   per-stem width setting in the plan yet (`panning.width` exists).
 - **Separated stems** are not raw takes: the rules advisor's "noisy take" SNR reading
@@ -121,6 +148,26 @@ Nothing is stubbed any more. What is left are limits of what exists:
 - **Queue:** one job at a time by default (`--workers N` for more). A running job can be
   cancelled but stops at its next progress report, so a long model call finishes first.
 
+## Guitar notes tab
+
+- **Transcription is Basic Pitch** (polyphonic, instrument-agnostic, run on
+  onnxruntime). It was picked after trying it on *Nothing Else Matters* (the picked
+  open-string intro comes out right, the solo's register too); a guitar-specific
+  model (trimplexx CRNN) had no licence to ship it under. Accuracy isn't measured on
+  labelled audio (GuitarSet was not downloaded here). Distortion, fast runs and
+  effects give wrong notes; expect to edit.
+- **Overtones** are removed by rule (a note an octave/12th/two octaves above a
+  clearly stronger one struck with it). Two octaves struck together at equal
+  strength are both kept, so the odd doubled octave stays.
+- **Lead vs rhythm** relies on the stereo picture and register. Two guitars both in
+  the centre, or one guitar playing lead and rhythm, can't be told apart; pin notes
+  by hand or lock the part.
+- **Techniques**: bends (½ / full) and vibrato only. Slides, hammer-ons, pull-offs,
+  palm mutes and harmonics are not detected.
+- **Strums** are recognised by four or more notes struck as one sweep. A strum the
+  model only heard three notes of stays as picked notes.
+- **No MusicXML export** yet; the text tab is the download.
+
 ## Harmonica
 
 - **Instruments modelled:** 12-hole chromatic (solo tuning) and 10-hole Richter diatonic,
@@ -139,6 +186,10 @@ Nothing is stubbed any more. What is left are limits of what exists:
   fingering for the melody only, not an arrangement with chords.
 
 ## Stem splitter
+
+- **The chord finder's sliders** split songs into the chord finder's own folder.
+  The splitter doesn't see those stems, so opening the same song in the splitter
+  splits it again (the other way round, the chord finder reuses the splitter's).
 
 The separation's limits are the model's (Demucs `htdemucs_6s`: acoustic guitar often
 lands in *Other*, keys is the weakest stem) and are described in

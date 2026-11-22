@@ -47,6 +47,8 @@ from pathlib import Path
 
 from .config import DEFAULT_CONFIG, treatment_for
 from .fx import OFF_DB, SYNC
+import numpy as np
+
 from .io_utils import Stem
 from .stretch import MAX_SEMITONES, MAX_SPEED, MIN_SPEED
 
@@ -90,7 +92,12 @@ LIMITS = {
     "chorus_rate_hz": (0.05, 5.0),
     "chorus_depth_ms": (0.5, 10.0),
     "tone_db": (-12.0, 12.0),
+    # a stretch of one stem turned down or muted (the mixer's lanes): dB, fade length
+    "region_db": (-60.0, 6.0),
+    "fade_ms": (5.0, 2000.0),
 }
+MAX_REGIONS = 64
+REGION_MUTE_DB = -60.0    # a region at or below this is silent
 
 # A send at or below this is treated as off.
 SEND_OFF_DB = OFF_DB
@@ -126,6 +133,35 @@ def _validate_comp(raw: dict | None, fallback: dict, default_ratio: float = 2.0)
         "makeup_db": _clamp(raw.get("makeup_db", fallback.get("makeup_db", 0.0)),
                             "makeup_db"),
     }
+
+
+def validate_regions(regions) -> list[dict]:
+    """Stretches of a stem played at another level: [{"start_s", "end_s", "gain_db",
+    "fade_ms"}] in song time, sorted. A region that overlaps the one before it
+    starts where that one ends; empty or reversed ones are dropped."""
+    out: list[dict] = []
+    if not isinstance(regions, list):
+        return out
+    clean = []
+    for r in regions[:MAX_REGIONS]:
+        if not isinstance(r, dict):
+            continue
+        try:
+            a, b = max(0.0, float(r.get("start_s", 0.0))), float(r.get("end_s", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if not (b > a and np.isfinite(a) and np.isfinite(b)):
+            continue
+        clean.append({"start_s": round(a, 3), "end_s": round(b, 3),
+                      "gain_db": _clamp(r.get("gain_db", REGION_MUTE_DB), "region_db", REGION_MUTE_DB),
+                      "fade_ms": _clamp(r.get("fade_ms", 30.0), "fade_ms", 30.0)})
+    for r in sorted(clean, key=lambda r: r["start_s"]):
+        if out and r["start_s"] < out[-1]["end_s"]:
+            r["start_s"] = out[-1]["end_s"]
+            if r["end_s"] - r["start_s"] < 0.01:
+                continue
+        out.append(r)
+    return out
 
 
 def validate_stem_entry(entry: dict, fallback: dict) -> dict:
@@ -168,6 +204,8 @@ def validate_stem_entry(entry: dict, fallback: dict) -> dict:
         out["sends"][key] = _clamp(
             sends_in.get(key, fb_sends.get(key, SEND_OFF_DB)), "send_db", SEND_OFF_DB
         )
+
+    out["regions"] = validate_regions(entry.get("regions", []))
 
     bands = entry.get("eq", fallback.get("eq", []))
     if not isinstance(bands, list):

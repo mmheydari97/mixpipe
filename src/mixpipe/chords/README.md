@@ -21,7 +21,8 @@ get an editable chord sheet:
 Works with a full song (vocals + instruments), a single instrumental track,
 several stems uploaded together, or a link.
 
-To mute the vocals or the guitar and play along instead, see the
+To sing or play along, turn the **Vocals** or **Guitar** slider under the player
+down (see [Playing along](#playing-along)). For every stem, speed and key, use the
 [stem splitter](../splitter/README.md), a separate app with the same install.
 
 All commands below are run from the **repository root** (the folder with
@@ -210,6 +211,73 @@ diatonic   hole   1  2  3  4  5  6  7  8  9  10
   your note edits on this tab; the harp you picked stays.
 - **Harmonica tab** downloads a plain-text version (`<song-id>.harp.txt`).
 
+### Playing along
+
+Two sliders sit next to the player: **Vocals** and **Guitar**, 0–100%. Turn one down
+to sing or play that part yourself; double-click a slider for 100% again.
+
+- Nothing is split when you add a song. The first time you move a slider, the song
+  is split into six stems (vocals, guitar, drums, bass, keys, other) with the
+  splitter's own code (`chords/stems6.py`), about half a minute for a five-minute
+  song. Until then you hear the full mix.
+- If the splitter already has the song (same id, for example one sent from the
+  splitter for analysis), its stems are used and nothing is split again. Otherwise
+  the stems are kept in this song's folder and the song does **not** show up in the
+  splitter's library.
+- The page plays three tracks in step with its player: vocals, guitar, and
+  everything else. Both sliders back at 100% is the original recording again.
+- The guitar stem is Demucs' (`htdemucs_6s`) idea of a guitar: an acoustic guitar
+  often lands in *other*, so turning **Guitar** down may leave some of it audible.
+
+### Guitar notes tab
+
+The third tab writes out what the **guitar plays**, note by note, as a staff (treble
+clef, written an octave above the sound as guitar music is), as tab, or **Both**.
+It is meant above all for the parts without singing: intros, solos, outros.
+
+- **Write out the guitar** splits the song if that isn't done yet (the same split as
+  the sliders), then transcribes the guitar stem with **Basic Pitch** (Spotify, an
+  open model that hears several notes at once; a few seconds per song). Install it
+  once with `make install-guitar` (onnxruntime, no TensorFlow).
+- **Strummed or picked.** Four or more notes struck as one sweep (or five and more
+  at once) are a strum: the staff shows the chord name with ↓ and the notes go to the
+  rhythm part. Everything else is written out note by note: single lines, double
+  stops, three strings plucked together, arpeggios.
+- **Lead and rhythm.** When two guitars play at once, the notes of each stretch of
+  two bars are split by where they sit in the stereo picture (a centred lead against
+  guitars panned left and right) and how high they play. **Lead guitar / Rhythm
+  guitar / All guitar notes** chooses what is shown. If it follows the wrong guitar,
+  click a note of the one you want and pick **★ This is the solo** (or **This is
+  the rhythm**): that guitar is followed everywhere from then on (shown above the
+  sheet; *forget it* undoes it). A single note can also be pinned to Lead or Rhythm.
+- **Without singing** lists the long instrumental stretches (Intro, Solo 1, Outro)
+  and jumps there. Sung stretches are folded (*show* opens one); **Whole song** opens
+  them all.
+- **Strings and frets** are chosen so the hand moves as little as possible, with
+  notes struck together on different strings within four frets. **Transpose** moves
+  the notes, **Capo** the frets (counted from the capo), **Instrument** the tuning
+  (standard, half or whole step down). The note menu offers every other place to play
+  a note (**Play on**, `string·fret`).
+- **Rhythm** comes from the song's beat grid: sixteenths or eighth-note triplets per
+  beat (eighths and sixteenths in 6/8), with rests and ties across bar lines. A song
+  in free time has no bars, so only the text tab works.
+- **Bends and vibrato** are marked (½, full, ~). A bend often reaches the model as
+  quick alternating notes or two notes a semitone apart; those become one bent note,
+  with the upper pitch as the second choice in the menu (a trill looks the same).
+- **Click a note** for the same menu as the harmonica tab: the heard pitch and its
+  octave alternatives with **▶ hear** (a plucked string over the song), another
+  pitch typed in, split, merge, add (**+ Note**), **✕ Not a note**.
+- **🎸 Guitar alone** mutes the vocals and the rest so you hear only the guitar
+  stem; click again to go back.
+- **Guitar tab** downloads the part shown as plain-text tab.
+- **Listen again** (click twice) transcribes the guitar again and replaces your note
+  edits on this tab.
+
+What to expect: distorted, fast or heavily effected solos, two guitars in the same
+place in the stereo picture, and an acoustic guitar that Demucs put in *other* all
+give wrong or missing notes. The tab is a draft to correct with the note menu, not a
+finished transcription.
+
 ### Other options on the page
 
 - **Instrument** (Chords tab): guitar, guitar tuned down a half or whole step,
@@ -287,8 +355,13 @@ out/chords/<song-id>/
   transcript.json   cached lyrics
   chords.json       cached chord analysis
   melody.json       cached melody notes (harmonica tab)
+  stems/            the six-stem split and backing.flac, made the first time a
+                    Vocals/Guitar slider moves or the guitar is written out
+  stems.json        what the split made
+  guitar.json       cached guitar notes (guitar notes tab)
   sheet.json        the sheet with all your edits
   status.json       progress of the last analysis
+  stems-status.json, guitar-status.json   progress of the split and the guitar tab
 ```
 
 - Separation and transcription are cached, so re-runs are quick.

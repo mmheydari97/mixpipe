@@ -85,3 +85,36 @@ synth.playNote = function (midi, duration) {
     });
   });
 };
+
+// A plucked string (Karplus-Strong): noise through a short delay line that loses a
+// little each pass, so it rings and fades like a guitar. The guitar tab's "hear".
+// A list of notes is strummed (a few ms apart).
+synth.pluck = function (midi, duration = 1.2) {
+  this.stop();
+  const ctx = this.ensure();
+  const midis = [].concat(midi);
+  const out = ctx.createGain();
+  out.gain.value = 0.35 / Math.sqrt(midis.length);
+  out.connect(ctx.destination);
+  this.nodes.push(out);
+  const ring = Math.min(Math.max(duration, 0.4), 3);
+  midis.forEach((m, k) => {
+    const sr = ctx.sampleRate;
+    const period = Math.max(2, Math.round(sr / (440 * 2 ** ((m - 69) / 12))));
+    const len = Math.round(sr * (ring + 0.3));
+    const buf = ctx.createBuffer(1, len, sr);
+    const y = buf.getChannelData(0);
+    for (let i = 0; i < period; i++) y[i] = Math.random() * 2 - 1;
+    for (let i = period; i < len; i++) y[i] = 0.4985 * (y[i - period] + y[i - period - 1 >= 0 ? i - period - 1 : i - period]);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const env = ctx.createGain();
+    const t0 = ctx.currentTime + 0.02 + k * 0.012;
+    env.gain.setValueAtTime(1, t0);
+    env.gain.setValueAtTime(1, t0 + ring);
+    env.gain.linearRampToValueAtTime(0, t0 + ring + 0.25);
+    src.connect(env); env.connect(out);
+    src.start(t0); src.stop(t0 + ring + 0.3);
+    this.nodes.push(src, env);
+  });
+};

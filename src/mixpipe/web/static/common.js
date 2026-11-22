@@ -109,17 +109,19 @@ function createJobUI(stages, labels) {
     container.replaceChildren(el("div", { class: "progress" }, parts));
   }
 
-  async function pollStatus(id, container, { onDone, onRetry } = {}) {
+  // status: another job's status URL (a side job keeps its own); cancel: false hides
+  // the Cancel button (it cancels the song's own job)
+  async function pollStatus(id, container, { onDone, onRetry, status = null, cancel = true } = {}) {
     for (;;) {
       let st;
-      try { st = await api(`/api/songs/${id}/status`); } catch (e) {
+      try { st = await api(status || `/api/songs/${id}/status`); } catch (e) {
         container.replaceChildren(el("div", { class: "msg error" }, e.message));
         return;
       }
-      const cancel = async () => {
+      const onCancel = cancel ? async () => {
         try { await api(`/api/songs/${id}/cancel`, { method: "POST" }); } catch { /* it just finished */ }
-      };
-      renderProgress(container, st, { onRetry, onCancel: cancel });
+      } : null;
+      renderProgress(container, st, { onRetry, onCancel });
       if (st.state === "done") { onDone?.(); return; }
       if (st.state === "error" || st.state === "cancelled") return;
       await new Promise((r) => setTimeout(r, 1000));

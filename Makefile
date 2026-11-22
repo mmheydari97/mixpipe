@@ -41,6 +41,12 @@ acestep:
 install-chords:
 	$(PIP) -r requirements.txt -r requirements-chords.txt
 
+# the guitar tab's note finder: Basic Pitch on onnxruntime. --no-deps because its
+# pinned dependencies would pull in TensorFlow and downgrade numpy.
+install-guitar:
+	$(PIP) -r requirements-guitar.txt
+	$(PIP) --no-deps basic-pitch==0.4.0
+
 stems:
 	$(RUN) scripts/make_test_stems.py
 

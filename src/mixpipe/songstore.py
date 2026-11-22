@@ -143,15 +143,17 @@ def list_songs(root: Path) -> list[dict]:
 
 
 def set_status(song_dir: Path, state: str, stage: str, progress: float,
-               message: str = "", error: str | None = None) -> None:
-    _write_json(Path(song_dir) / "status.json", {
+               message: str = "", error: str | None = None, file: str = "status.json") -> None:
+    """`file`: a side job (the chord finder's stem split) keeps its own status so
+    it doesn't hide the song's."""
+    _write_json(Path(song_dir) / file, {
         "state": state, "stage": stage, "progress": round(progress, 3),
         "message": message, "error": error, "updated": time.time(),
     })
 
 
-def get_status(song_dir: Path) -> dict:
-    path = Path(song_dir) / "status.json"
+def get_status(song_dir: Path, file: str = "status.json") -> dict:
+    path = Path(song_dir) / file
     if not path.exists():
         return {"state": "unknown"}
     status = json.loads(path.read_text())
@@ -161,7 +163,7 @@ def get_status(song_dir: Path) -> dict:
 
 
 def run_job(song_dir: Path, work: Callable[[Progress], object], done_stage: str,
-            cancelled: Callable[[], bool] | None = None):
+            cancelled: Callable[[], bool] | None = None, status_file: str = "status.json"):
     """Run work(progress) with status.json bookkeeping; never raises. Returns
     work's result, or None if it failed (the error is in status.json) or was
     cancelled (state "cancelled").
@@ -178,22 +180,22 @@ def run_job(song_dir: Path, work: Callable[[Progress], object], done_stage: str,
         now = time.monotonic()
         if frac in (0.0, 1.0) or now - last["t"] > 0.5:
             last["t"] = now
-            set_status(song_dir, "running", stage, frac, msg)
+            set_status(song_dir, "running", stage, frac, msg, file=status_file)
 
     try:
         if cancelled is not None and cancelled():
             raise JobCancelled()
         result = work(progress)
     except JobCancelled:
-        st = get_status(song_dir)
+        st = get_status(song_dir, status_file)
         set_status(song_dir, "cancelled", st.get("stage", "decode"), st.get("progress", 0.0),
-                   "cancelled")
+                   "cancelled", file=status_file)
         return None
     except Exception as exc:  # noqa: BLE001 - surface any failure to the UI
-        st = get_status(song_dir)
+        st = get_status(song_dir, status_file)
         error = str(exc) if isinstance(exc, FetchError) else f"{type(exc).__name__}: {exc}"
         set_status(song_dir, "error", st.get("stage", "decode"), st.get("progress", 0.0),
-                   "failed", error=error)
+                   "failed", error=error, file=status_file)
         return None
-    set_status(song_dir, "done", done_stage, 1.0, "done")
+    set_status(song_dir, "done", done_stage, 1.0, "done", file=status_file)
     return result

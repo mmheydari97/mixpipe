@@ -117,10 +117,12 @@
           <a id="export-cho" class="button" download>ChordPro</a>
           <a id="export-txt" class="button" download>Text</a>
           <a id="export-harp" class="button" download hidden>Harmonica tab</a>
+          <a id="export-tab" class="button" download hidden title="The guitar part shown, as plain-text tab">Guitar tab</a>
         </div>
         <nav class="tabs" role="tablist" aria-label="Instrument">
           <a id="tab-guitar" role="tab" aria-selected="true">Chords <em id="chord-instrument">Guitar</em></a>
           <a id="tab-harmonica" role="tab" aria-selected="false">Harmonica <em id="harp-name">C chromatic</em></a>
+          <a id="tab-solo" role="tab" aria-selected="false">Guitar notes <em>staff &amp; tab</em></a>
         </nav>
       </div>
 
@@ -216,6 +218,32 @@
         <div id="melody-progress"></div>
         <div id="harp-sheet" class="sheet harp"></div>
       </div>
+      <div id="solo-panel" hidden>
+        <div class="harp-head">
+          <span class="seg-buttons" role="group" aria-label="Show">
+            <button data-gmode="staff" aria-pressed="false" title="Notes on a staff (treble clef, written an octave up as guitar music is)">Staff</button>
+            <button data-gmode="tab" aria-pressed="false" title="Tablature: string and fret">Tab</button>
+            <button data-gmode="both" aria-pressed="true" title="Staff with the tab under it">Both</button>
+          </span>
+          <select id="solo-part" aria-label="Which guitar part"
+                  title="Where two guitars play at once: the lead (solo) part, the rhythm part, or both">
+            <option value="lead">Lead guitar</option>
+            <option value="rhythm">Rhythm guitar</option>
+            <option value="both">All guitar notes</option>
+          </select>
+          <label class="check small" title="Show the sung parts too, not only the stretches without singing">
+            <input id="solo-all" type="checkbox"> Whole song</label>
+          <span id="solo-meta" class="meta"></span>
+          <span class="spacer"></span>
+          <button id="solo-hear" aria-pressed="false" title="Hear the guitar alone (vocals and the rest muted; uses the stems)">🎸 Guitar alone</button>
+          <button id="solo-add" title="Add a note the transcription missed, at the playhead">+ Note</button>
+          <button id="solo-btn">Write out the guitar</button>
+        </div>
+        <div id="solo-nav" class="suggest" hidden></div>
+        <div id="solo-lock" class="hint" hidden></div>
+        <div id="solo-progress"></div>
+        <div id="solo-sheet" class="solo-sheet"></div>
+      </div>
     </section>
   </main>
 
@@ -224,6 +252,14 @@
     <div class="now">
       <span class="now-label">Now</span><b id="now-chord">–</b>
       <span class="now-label">Next</span><span id="next-chord">–</span>
+    </div>
+    <div class="mutes" title="Turn a part down to sing or play it yourself. The first time, the song is split into stems (about a minute); the full mix plays until then. Double-click a slider for 100%.">
+      <label>Vocals <input id="pa-vocals" type="range" min="0" max="1" step="0.05" value="1" aria-label="Vocals volume">
+        <output id="pa-vocals-out">100%</output></label>
+      <label>Guitar <input id="pa-guitar" type="range" min="0" max="1" step="0.05" value="1" aria-label="Guitar volume">
+        <output id="pa-guitar-out">100%</output></label>
+      <small id="pa-msg" class="pa-msg" hidden role="status"></small>
+      <button id="pa-retry" class="link" hidden>Retry</button>
     </div>
   </footer>
 
@@ -251,7 +287,12 @@
   <script src="/static/common.js"></script>
   <script src="/static/sheet.js"></script>
   <script src="/static/synth.js"></script>
+  <script src="/static/stem-player.js"></script>
+  <script src="/static/vendor/vexflow.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/note-menu.js"></script>
   <script src="/static/harmonica.js"></script>
+  <script src="/static/playalong.js"></script>
+  <script src="/static/guitar.js"></script>
 </body>
 </html>
