@@ -4,9 +4,10 @@ is ringing and how far off it is.
     python -m mixpipe.cli tuner-ui          # http://127.0.0.1:8768
 
 GET /api/tunings   every tuning the page's two switches make (theory.guitar_tuning)
-WS  /ws            text frames set {sr, whole_down, drop6, a4, lock} (the first one
-                   must carry sr); binary frames are float32 mono chunks; each chunk
-                   is answered with one reading from tuner.StringTracker.
+WS  /ws            text frames set {sr, whole_down, drop6, a4, lock, wait} (the first
+                   one must carry sr; wait: start on the next pluck); binary frames are
+                   float32 mono chunks; each chunk is answered with one reading from
+                   tuner.StringTracker: silent | pending | note | tuned (locked in).
 """
 
 from __future__ import annotations
@@ -67,7 +68,8 @@ def create_app() -> FastAPI:
                         tracker.configure(
                             strings=_strings(cfg) if {"whole_down", "drop6"} & cfg.keys() else None,
                             a4=_a4(cfg["a4"]) if "a4" in cfg else None,
-                            lock=cfg["lock"] if "lock" in cfg else "keep")
+                            lock=cfg["lock"] if "lock" in cfg else "keep",
+                            wait=bool(cfg.get("wait")))
                 elif msg.get("bytes") is not None and tracker is not None:
                     data = msg["bytes"]
                     chunk = np.frombuffer(data[: len(data) // 4 * 4], dtype="<f4")[:MAX_CHUNK]

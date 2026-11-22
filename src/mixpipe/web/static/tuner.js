@@ -3,11 +3,17 @@
 // The microphone goes to the server in chunks (tuner-capture.js -> WebSocket /ws);
 // the server (tuner.py) answers each with which string rings and how far off it
 // is. Strings are numbered 6 (lowest) to 1, as the server numbers them.
+// When a string has stayed in tune a moment the server says "tuned" and freezes
+// it: the chip is marked done, a chime plays and the page asks for the next one.
 
 const IN_TUNE = 5;       // cents: green
 const CLOSE = 15;        // cents: amber; beyond is red
 const QUIET_MS = 600;    // no note this long: the needle greys out
 const SCALE = 3.6;       // gauge units per cent (±50 cents = ±180)
+// E7, B7 (2.6, 4 kHz): the tuner hears them through the mic, and they're far enough
+// above its 1.2 kHz low-pass not to count as a pluck or a string
+const CHIME = [100, 107];
+const CHIME_ALL = [100, 104, 107];
 
 const T = {
   tunings: [],
@@ -17,6 +23,7 @@ const T = {
   a4: Number(store.get("mixpipe.tunerA4")) || 440,
   lock: null,                     // string number, or null for automatic
   readings: new Map(),            // string number -> last cents heard
+  done: new Set(),                // strings that locked in as tuned
   active: null,                   // string on display
   shown: null,                    // smoothed cents on the needle
   lastNote: 0,
@@ -34,6 +41,7 @@ function pickTuning() {
   $("#tuning-name").textContent = T.tuning.name;
   $("#tuning-notes").textContent = T.tuning.strings.map((s) => bare(s.label)).join(" ");
   T.readings.clear();
+  T.done.clear();
   T.active = null;
   T.shown = null;
   renderStrings();
@@ -58,6 +66,8 @@ function onA4() {
   if (!(v >= 420 && v <= 460)) { $("#a4").value = T.a4; return; }
   T.a4 = v;
   store.set("mixpipe.tunerA4", String(v));
+  T.done.clear();
+  updateStrings();
   send({ a4: v });
 }
 
@@ -101,8 +111,9 @@ function updateStrings() {
     const n = Number(chip.dataset.string);
     const cents = T.readings.get(n);
     const locked = T.lock === n;
-    chip.className = `string ${chipState(cents)}${T.active === n ? " active" : ""}${locked ? " locked" : ""}`;
-    chip.querySelector(".reading").textContent = readingText(cents);
+    const done = T.done.has(n);
+    chip.className = `string ${done ? "ok done" : chipState(cents)}${T.active === n ? " active" : ""}${locked ? " locked" : ""}`;
+    chip.querySelector(".reading").textContent = done ? "✓ tuned" : readingText(cents);
     const pick = chip.querySelector(".pick");
     pick.setAttribute("aria-pressed", locked ? "true" : "false");
     pick.title = locked ? "Locked: tap for automatic" : `Lock string ${n}`;
@@ -181,28 +192,66 @@ function onReading(r) {
     if (r.state === "silent" && !T.quietTimer && T.lastNote) {
       T.quietTimer = setTimeout(() => {
         T.quietTimer = null;
-        if (performance.now() - T.lastNote >= QUIET_MS) $("#readout").dataset.state = "quiet";
+        const box = $("#readout");
+        // a tuned string's verdict and the next-string prompt stay up
+        if (performance.now() - T.lastNote >= QUIET_MS && box.dataset.state !== "tuned") box.dataset.state = "quiet";
       }, QUIET_MS);
     }
     return;
   }
+  if (r.state === "tuned") { onTuned(r); return; }
   T.lastNote = performance.now();
   const s = targetOf(r.string);
   if (!s) return;
   if (r.string !== T.active) { T.active = r.string; T.shown = null; }
-  // ease the needle: a plucked string wobbles a few cents
-  T.shown = T.shown == null || Math.abs(r.cents - T.shown) > 40 ? r.cents : T.shown * 0.55 + r.cents * 0.45;
+  // ease the needle; the server already sends a median of the last few readings
+  T.shown = T.shown == null ? r.cents : T.shown * 0.5 + r.cents * 0.5;
   T.readings.set(r.string, T.shown);
+  if (T.done.has(r.string) && Math.abs(r.cents) > IN_TUNE) T.done.delete(r.string);   // gone out again
 
   const a = advice(T.shown, r.semitones_off, r.heard);
   const box = $("#readout");
   box.dataset.state = "note";
   box.dataset.tone = a.tone;
+  box.dataset.all = "";
   $("#note").textContent = s.label;
   $("#string-no").textContent = `string ${r.string}${r.locked ? " · locked" : ""}`;
   $("#hz").textContent = `${r.hz.toFixed(1)} Hz`;
   $("#advice").textContent = a.text;
   setNeedle(T.shown);
+  updateStrings();
+}
+
+// the first string, 6 to 1, not tuned yet; null when all are
+const nextString = () => T.tuning.strings.map((s) => s.string).find((n) => !T.done.has(n)) ?? null;
+
+function onTuned(r) {
+  T.lastNote = performance.now();
+  const s = targetOf(r.string);
+  if (!s) return;
+  const first = !T.done.has(r.string);
+  T.done.add(r.string);
+  T.active = r.string;
+  T.shown = r.cents;
+  T.readings.set(r.string, r.cents);
+  const next = nextString();
+  if (r.new) {
+    if (first && next == null) synth.chime(CHIME_ALL, { gap: 0.13, ring: 0.5 });
+    else synth.chime(CHIME);
+    // locked: the lock moves on, and the server waits for that string's pluck
+    if (first && T.lock != null && next != null) { T.lock = next; send({ lock: next, wait: true }); }
+  }
+  const box = $("#readout");
+  box.dataset.state = "tuned";
+  box.dataset.tone = "ok";
+  box.dataset.all = next == null ? "1" : "";
+  $("#note").textContent = s.label;
+  $("#string-no").textContent = `string ${r.string} · tuned`;
+  $("#hz").textContent = `${r.hz.toFixed(1)} Hz`;
+  $("#advice").textContent = next == null
+    ? "✓ All six strings are tuned. Ready to play!"
+    : `✓ String ${r.string} is tuned. Play string ${next} (${bare(targetOf(next).label)}) next.`;
+  setNeedle(r.cents);
   updateStrings();
 }
 

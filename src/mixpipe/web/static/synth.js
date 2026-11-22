@@ -1,7 +1,8 @@
 "use strict";
 // A small Web Audio synth shared by the pages: the chord finder's chord audition
 // (synth.play, added by app.js), the harmonica's notes and the tuner's reference
-// tones (synth.playNote). Load before the page script.
+// tones (synth.playNote) and its "in tune" chime (synth.chime). Load before the
+// page script.
 
 const synth = {
   ctx: null,
@@ -18,6 +19,34 @@ const synth = {
     }
     this.nodes = [];
   },
+};
+
+// A soft bell: sine notes one after another (`gap` seconds apart), each dying away
+// over `ring` seconds. Doesn't stop a note already playing. The tuner's "in tune"
+// confirmation; keep it high (above the tuner's low-pass) and short, since the
+// microphone hears it too.
+synth.chime = function (midis, { gap = 0.11, ring = 0.32, level = 0.07 } = {}) {
+  const ctx = this.ensure();
+  const out = ctx.createGain();
+  out.gain.value = level;
+  out.connect(ctx.destination);
+  const t0 = ctx.currentTime + 0.02;
+  const notes = [].concat(midis);
+  notes.forEach((m, i) => {
+    const start = t0 + i * gap;
+    const osc = ctx.createOscillator();
+    osc.type = "sine";
+    osc.frequency.value = 440 * 2 ** ((m - 69) / 12);
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0, start);
+    env.gain.linearRampToValueAtTime(1, start + 0.006);
+    env.gain.exponentialRampToValueAtTime(0.001, start + ring);
+    osc.connect(env); env.connect(out);
+    osc.start(start); osc.stop(start + ring + 0.02);
+    osc.onended = () => {
+      try { env.disconnect(); if (i === notes.length - 1) out.disconnect(); } catch { /* gone */ }
+    };
+  });
 };
 
 // A reed-ish tone: detuned saw + square through a lowpass, with a soft attack.

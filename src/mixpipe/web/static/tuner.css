@@ -19,6 +19,11 @@
 .readout[data-state=note][data-tone=ok] { --tone: var(--ok); }
 .readout[data-state=note][data-tone=near] { --tone: var(--warn); }
 .readout[data-state=note][data-tone=off] { --tone: var(--danger); }
+.readout[data-state=tuned] { --tone: var(--ok); background: color-mix(in srgb, var(--ok) 9%, var(--surface-2)); }
+.readout[data-state=tuned][data-all="1"] { background: color-mix(in srgb, var(--ok) 16%, var(--surface-2)); }
+.readout[data-state=tuned][data-all="1"] .advice { font-size: 1.4rem; }
+.readout[data-state=tuned] .note { animation: tuned-pop .35s ease-out; }
+@keyframes tuned-pop { 0% { transform: scale(.92); } 60% { transform: scale(1.06); } 100% { transform: none; } }
 .readout[data-state=quiet] .needle, .readout[data-state=idle] .needle { opacity: .3; }
 
 .note-line { display: flex; align-items: baseline; justify-content: center; gap: 12px; }
@@ -33,7 +38,7 @@
 .needle { transition: transform .12s linear, opacity .3s; }
 .needle line { stroke: var(--tone); stroke-width: 3; stroke-linecap: round; }
 .needle circle { fill: var(--tone); }
-@media (prefers-reduced-motion: reduce) { .needle { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .needle { transition: none; } .readout[data-state=tuned] .note { animation: none; } }
 
 .advice { margin: 4px 0 0; font-size: 1.25rem; font-weight: 600; color: var(--tone); min-height: 1.6em; }
 .readout[data-state=idle] .advice, .readout[data-state=quiet] .advice { color: var(--muted); font-weight: 500; font-size: 1rem; }
@@ -46,6 +51,8 @@
 .string.near { --tone: var(--warn); }
 .string.off { --tone: var(--danger); }
 .string.active { box-shadow: 0 0 0 2px var(--accent); }
+.string.done .pick { background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.string.done .reading { font-weight: 600; }
 .string button { border: 0; border-radius: 0; background: transparent; justify-content: center; }
 .string .pick { display: grid; gap: 2px; padding: 8px 4px 6px; position: relative; text-align: center; }
 .string .num { color: var(--muted); font-size: .75em; }
@@ -65,3 +72,4 @@
   .note { font-size: 2.8rem; }
   .advice { font-size: 1.1rem; }
 }
+.help + .help { margin-top: 6px; }
