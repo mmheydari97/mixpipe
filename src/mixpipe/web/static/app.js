@@ -681,4 +681,6 @@ function route() {
 initLibrary();
 initSongView();
 window.addEventListener("hashchange", route);
-route();
+// route() calls into the scripts loaded after this one (playalong.js, guitar.js…),
+// so the first call waits until they have all run
+document.addEventListener("DOMContentLoaded", route);
